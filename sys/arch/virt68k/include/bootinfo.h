@@ -68,6 +68,9 @@ struct bi_record {
 #define	BI_VIRT_GF_TTY_BASE	BI_MACHDEP(3)
 #define	BI_VIRT_VIRTIO_BASE	BI_MACHDEP(4)
 #define	BI_VIRT_CTRL_BASE	BI_MACHDEP(5)
+					/* 6: was BI_VIRT_RNG_SEED */
+#define	BI_VIRT_SMP_BASE	BI_MACHDEP(7)	/* bi_virt_dev, but the
+						   2nd word is the # of CPUs */
 
 struct bi_mem_info {
 	uint32_t	mem_addr;	/* PA of memory segment */

@@ -248,6 +248,179 @@ pt_entry_t	*Sysmap, *Sysptmap;
 st_entry_t	*Segtabzero, *Segtabzeropa;
 vsize_t		Sysptsize = VM_KERNEL_PT_PAGES;
 
+#ifdef MULTIPROCESSOR
+/*
+ * MULTIPROCESSOR support.  This pmap was written for one CPU and relies
+ * on splvm() for mutual exclusion; with several CPUs:
+ *
+ * - The public entry points take the kernel lock (it is recursive, and
+ *   released while the pmap sleeps in uvm_wait() & co, which gives the
+ *   same semantics as on a uniprocessor).  pmap_kenter_pa() and
+ *   pmap_kremove(), which may be called from interrupt handlers, and the
+ *   kernel PT page lists, use a recursive spin lock (pmap_klock) instead.
+ *   The *_unlocked functions are the original ones.
+ * - Every TLB invalidation is also done on the other running CPUs, by
+ *   an IPI (pmap_tlb_shootdown()), since active_pmap() cannot tell if a
+ *   pmap is in use on another CPU.  A full invalidation also makes the
+ *   other CPUs reload their user root pointer (the segment table of a
+ *   process may change while it runs threads on other CPUs).
+ *
+ * This favours correctness over speed.
+ */
+#include <sys/kcpuset.h>
+
+static inline void pmap_load_urp(paddr_t);
+static void	pmap_tbis_local(vaddr_t);
+static void	pmap_tbia_local(void);
+
+static void
+pmap_tbis_local(vaddr_t va)
+{
+	TBIS(va);
+}
+
+static void
+pmap_tbia_local(void)
+{
+	TBIA();
+}
+
+#undef	TBIS
+#undef	TBIA
+#undef	TBIAS
+#undef	TBIAU
+#define	TBIS(va)	do {						\
+		pmap_tbis_local(va);					\
+		pmap_tlb_shootdown(va);					\
+	} while (/*CONSTCOND*/0)
+#define	TBIA()		do {						\
+		pmap_tbia_local();					\
+		pmap_tlb_shootdown(PMAP_TLB_ALL);			\
+	} while (/*CONSTCOND*/0)
+#define	TBIAS()		TBIA()
+#define	TBIAU()		TBIA()
+#define	TBIS_LOCAL(va)	pmap_tbis_local(va)
+
+#define	pmap_remove		pmap_remove_unlocked
+#define	pmap_page_protect	pmap_page_protect_unlocked
+#define	pmap_protect		pmap_protect_unlocked
+#define	pmap_enter		pmap_enter_unlocked
+#define	pmap_kenter_pa		pmap_kenter_pa_unlocked
+#define	pmap_kremove		pmap_kremove_unlocked
+#define	pmap_unwire		pmap_unwire_unlocked
+#define	pmap_clear_modify	pmap_clear_modify_unlocked
+#define	pmap_clear_reference	pmap_clear_reference_unlocked
+#define	pmap_is_referenced	pmap_is_referenced_unlocked
+#define	pmap_is_modified	pmap_is_modified_unlocked
+#define	pmap_destroy		pmap_destroy_unlocked
+
+static void	pmap_remove(pmap_t, vaddr_t, vaddr_t);
+static void	pmap_page_protect(struct vm_page *, vm_prot_t);
+static void	pmap_protect(pmap_t, vaddr_t, vaddr_t, vm_prot_t);
+static int	pmap_enter(pmap_t, vaddr_t, paddr_t, vm_prot_t, u_int);
+static void	pmap_kenter_pa(vaddr_t, paddr_t, vm_prot_t, u_int);
+static void	pmap_kremove(vaddr_t, vsize_t);
+static void	pmap_unwire(pmap_t, vaddr_t);
+static bool	pmap_clear_modify(struct vm_page *);
+static bool	pmap_clear_reference(struct vm_page *);
+static bool	pmap_is_referenced(struct vm_page *);
+static bool	pmap_is_modified(struct vm_page *);
+static void	pmap_destroy(pmap_t);
+
+/* Recursive spin lock for the kernel PTEs and PT page lists. */
+static __cpu_simple_lock_t pmap_klock_lock = __SIMPLELOCK_UNLOCKED;
+static struct cpu_info * volatile pmap_klock_owner;
+static int pmap_klock_depth;
+
+static int
+pmap_klock(void)
+{
+	int s = splvm();
+	struct cpu_info *ci = curcpu();
+
+	if (pmap_klock_owner == ci) {
+		pmap_klock_depth++;
+	} else {
+		__cpu_simple_lock(&pmap_klock_lock);
+		pmap_klock_owner = ci;
+		pmap_klock_depth = 1;
+	}
+	return s;
+}
+
+static void
+pmap_kunlock(int s)
+{
+	KASSERT(pmap_klock_owner == curcpu());
+	if (--pmap_klock_depth == 0) {
+		pmap_klock_owner = NULL;
+		__cpu_simple_unlock(&pmap_klock_lock);
+	}
+	splx(s);
+}
+
+/* TLB shootdown mailbox */
+static __cpu_simple_lock_t pmap_tlb_lock = __SIMPLELOCK_UNLOCKED;
+static volatile vaddr_t pmap_tlb_va;
+static volatile u_int pmap_tlb_pending;
+
+void
+pmap_tlb_shootdown(vaddr_t va)
+{
+	CPU_INFO_ITERATOR cii;
+	struct cpu_info *ci, *self;
+	u_int n;
+	int s;
+
+	if (kcpuset_running == NULL || kcpuset_countset(kcpuset_running) < 2)
+		return;
+	/* The other CPUs must be able to interrupt us while we wait. */
+	s = splvm();
+	KASSERT((s & PSL_IPL) < PSL_IPL6);
+	while (!__cpu_simple_lock_try(&pmap_tlb_lock))
+		continue;
+	self = curcpu();
+	n = 0;
+	pmap_tlb_va = va;
+	for (CPU_INFO_FOREACH(cii, ci)) {
+		if (ci != self && kcpuset_isset(kcpuset_running, cpu_index(ci)))
+			n++;
+	}
+	pmap_tlb_pending = n;
+	for (CPU_INFO_FOREACH(cii, ci)) {
+		if (ci != self && kcpuset_isset(kcpuset_running, cpu_index(ci)))
+			m68k_send_tlb_ipi(ci);
+	}
+	while (pmap_tlb_pending != 0)
+		continue;
+	__cpu_simple_unlock(&pmap_tlb_lock);
+	splx(s);
+}
+
+/* IPI handler (IPL_SCHED) */
+void
+pmap_tlb_shootdown_ipi(void)
+{
+	vaddr_t va = pmap_tlb_va;
+
+	if (va == PMAP_TLB_ALL) {
+		struct lwp *l = curlwp;
+		pmap_t pm;
+
+		pmap_tbia_local();
+		if ((l->l_flag & LW_SYSTEM) == 0 && l->l_proc->p_vmspace) {
+			pm = vm_map_pmap(&l->l_proc->p_vmspace->vm_map);
+			pmap_load_urp((paddr_t)pm->pm_stpa);
+		}
+	} else {
+		pmap_tbis_local(va);
+	}
+	atomic_dec_uint(&pmap_tlb_pending);
+}
+#else
+#define	TBIS_LOCAL(va)	TBIS(va)
+#endif /* MULTIPROCESSOR */
+
 static struct pmap kernel_pmap_store;
 struct pmap	*const kernel_pmap_ptr = &kernel_pmap_store;
 struct vm_map	*st_map, *pt_map;
@@ -292,6 +465,24 @@ u_int		protostfree;	/* prototype (default) free ST map */
 pt_entry_t	*caddr1_pte;	/* PTE for CADDR1 */
 pt_entry_t	*caddr2_pte;	/* PTE for CADDR2 */
 
+#ifdef MULTIPROCESSOR
+/*
+ * Each CPU has its own pair of zero/copy windows: CPU n uses the pages
+ * at CADDR1 + 2n and CADDR1 + 2n + 1 (CADDR2 is CADDR1 + 1 page), so the
+ * TBIS() of the local CPU is enough.
+ */
+#define	PMAP_CADDR_OFF()	(2 * cpu_index(curcpu()))
+#define	PMAP_CADDR1()	((vaddr_t)CADDR1 + PMAP_CADDR_OFF() * PAGE_SIZE)
+#define	PMAP_CADDR2()	((vaddr_t)CADDR2 + PMAP_CADDR_OFF() * PAGE_SIZE)
+#define	PMAP_CADDR1_PTE() (caddr1_pte + PMAP_CADDR_OFF())
+#define	PMAP_CADDR2_PTE() (caddr2_pte + PMAP_CADDR_OFF())
+#else
+#define	PMAP_CADDR1()		((vaddr_t)CADDR1)
+#define	PMAP_CADDR2()		((vaddr_t)CADDR2)
+#define	PMAP_CADDR1_PTE()	caddr1_pte
+#define	PMAP_CADDR2_PTE()	caddr2_pte
+#endif
+
 struct pool	pmap_pmap_pool;	/* memory pool for pmap structures */
 struct pool	pmap_pv_pool;	/* memory pool for pv entries */
 
@@ -333,8 +524,13 @@ void pmap_check_wiring(const char *, vaddr_t);
 #define	PRM_CFLUSH	0x02
 #define	PRM_KEEPPTPAGE	0x04
 
+#ifdef MULTIPROCESSOR
+/* may be active on another CPU: always flush (see above) */
+#define	active_pmap(pm)	(__USE(pm), 1)
+#else
 #define	active_pmap(pm) \
 	((pm) == pmap_kernel() || (pm) == curproc->p_vmspace->vm_map.pmap)
+#endif
 
 #define	active_user_pmap(pm) \
 	(curproc && \
@@ -1495,7 +1691,7 @@ pmap_kenter_pa(vaddr_t va, paddr_t pa, vm_prot_t prot, u_int flags)
 #endif
 
 	*pte = npte;
-	TBIS(va);
+	TBIS_LOCAL(va);		/* the PTE was invalid: nothing to shoot down */
 }
 
 void
@@ -1888,14 +2084,17 @@ pmap_zero_page(paddr_t phys)
 	}
 #endif
 
-	*caddr1_pte = npte;
-	TBIS((vaddr_t)CADDR1);
+	vaddr_t va1 = PMAP_CADDR1();
+	pt_entry_t *pte1 = PMAP_CADDR1_PTE();
 
-	zeropage(CADDR1);
+	*pte1 = npte;
+	TBIS_LOCAL(va1);
+
+	zeropage((void *)va1);
 
 #ifdef DEBUG
-	*caddr1_pte = PG_NV;
-	TBIS((vaddr_t)CADDR1);
+	*pte1 = PG_NV;
+	TBIS_LOCAL(va1);
 #endif
 }
 
@@ -1948,20 +2147,23 @@ pmap_copy_page(paddr_t src, paddr_t dst)
 	}
 #endif
 
-	*caddr1_pte = npte1;
-	TBIS((vaddr_t)CADDR1);
+	vaddr_t va1 = PMAP_CADDR1(), va2 = PMAP_CADDR2();
+	pt_entry_t *pte1 = PMAP_CADDR1_PTE(), *pte2 = PMAP_CADDR2_PTE();
 
-	*caddr2_pte = npte2;
-	TBIS((vaddr_t)CADDR2);
+	*pte1 = npte1;
+	TBIS_LOCAL(va1);
 
-	copypage(CADDR1, CADDR2);
+	*pte2 = npte2;
+	TBIS_LOCAL(va2);
+
+	copypage((void *)va1, (void *)va2);
 
 #ifdef DEBUG
-	*caddr1_pte = PG_NV;
-	TBIS((vaddr_t)CADDR1);
+	*pte1 = PG_NV;
+	TBIS_LOCAL(va1);
 
-	*caddr2_pte = PG_NV;
-	TBIS((vaddr_t)CADDR2);
+	*pte2 = PG_NV;
+	TBIS_LOCAL(va2);
 #endif
 }
 
@@ -2635,7 +2837,11 @@ pmap_enter_ptpage(pmap_t pmap, vaddr_t va, bool can_fail)
 	if (pmap == pmap_kernel()) {
 		struct kpt_page *kpt;
 
+#ifdef MULTIPROCESSOR
+		s = pmap_klock();
+#else
 		s = splvm();
+#endif
 		if ((kpt = kpt_free_list) == NULL) {
 			/*
 			 * No PT pages available.
@@ -2663,7 +2869,11 @@ pmap_enter_ptpage(pmap_t pmap, vaddr_t va, bool can_fail)
 			    ix, Sysptmap[ix], kpt->kpt_va);
 		}
 #endif
+#ifdef MULTIPROCESSOR
+		pmap_kunlock(s);
+#else
 		splx(s);
+#endif
 	} else {
 
 		/*
@@ -3004,3 +3214,137 @@ kvtop(void *addr)
 {
 	return (int)vtophys((vaddr_t)addr);
 }
+
+#ifdef MULTIPROCESSOR
+/*
+ * Locked entry points (see the comment at the top of this file).
+ */
+#undef	pmap_remove
+#undef	pmap_page_protect
+#undef	pmap_protect
+#undef	pmap_enter
+#undef	pmap_kenter_pa
+#undef	pmap_kremove
+#undef	pmap_unwire
+#undef	pmap_clear_modify
+#undef	pmap_clear_reference
+#undef	pmap_is_referenced
+#undef	pmap_is_modified
+#undef	pmap_destroy
+
+#define	PMAP_KLOCK_BEGIN	KERNEL_LOCK(1, NULL)
+#define	PMAP_KLOCK_END		KERNEL_UNLOCK_ONE(NULL)
+
+void
+pmap_remove(pmap_t pmap, vaddr_t sva, vaddr_t eva)
+{
+	PMAP_KLOCK_BEGIN;
+	pmap_remove_unlocked(pmap, sva, eva);
+	PMAP_KLOCK_END;
+}
+
+void
+pmap_page_protect(struct vm_page *pg, vm_prot_t prot)
+{
+	PMAP_KLOCK_BEGIN;
+	pmap_page_protect_unlocked(pg, prot);
+	PMAP_KLOCK_END;
+}
+
+void
+pmap_protect(pmap_t pmap, vaddr_t sva, vaddr_t eva, vm_prot_t prot)
+{
+	PMAP_KLOCK_BEGIN;
+	pmap_protect_unlocked(pmap, sva, eva, prot);
+	PMAP_KLOCK_END;
+}
+
+int
+pmap_enter(pmap_t pmap, vaddr_t va, paddr_t pa, vm_prot_t prot, u_int flags)
+{
+	int error;
+
+	PMAP_KLOCK_BEGIN;
+	error = pmap_enter_unlocked(pmap, va, pa, prot, flags);
+	PMAP_KLOCK_END;
+	return error;
+}
+
+void
+pmap_kenter_pa(vaddr_t va, paddr_t pa, vm_prot_t prot, u_int flags)
+{
+	int s = pmap_klock();
+
+	pmap_kenter_pa_unlocked(va, pa, prot, flags);
+	pmap_kunlock(s);
+}
+
+void
+pmap_kremove(vaddr_t va, vsize_t size)
+{
+	int s = pmap_klock();
+
+	pmap_kremove_unlocked(va, size);
+	pmap_kunlock(s);
+}
+
+void
+pmap_unwire(pmap_t pmap, vaddr_t va)
+{
+	PMAP_KLOCK_BEGIN;
+	pmap_unwire_unlocked(pmap, va);
+	PMAP_KLOCK_END;
+}
+
+bool
+pmap_clear_modify(struct vm_page *pg)
+{
+	bool rv;
+
+	PMAP_KLOCK_BEGIN;
+	rv = pmap_clear_modify_unlocked(pg);
+	PMAP_KLOCK_END;
+	return rv;
+}
+
+bool
+pmap_clear_reference(struct vm_page *pg)
+{
+	bool rv;
+
+	PMAP_KLOCK_BEGIN;
+	rv = pmap_clear_reference_unlocked(pg);
+	PMAP_KLOCK_END;
+	return rv;
+}
+
+bool
+pmap_is_referenced(struct vm_page *pg)
+{
+	bool rv;
+
+	PMAP_KLOCK_BEGIN;
+	rv = pmap_is_referenced_unlocked(pg);
+	PMAP_KLOCK_END;
+	return rv;
+}
+
+bool
+pmap_is_modified(struct vm_page *pg)
+{
+	bool rv;
+
+	PMAP_KLOCK_BEGIN;
+	rv = pmap_is_modified_unlocked(pg);
+	PMAP_KLOCK_END;
+	return rv;
+}
+
+void
+pmap_destroy(pmap_t pmap)
+{
+	PMAP_KLOCK_BEGIN;
+	pmap_destroy_unlocked(pmap);
+	PMAP_KLOCK_END;
+}
+#endif /* MULTIPROCESSOR */

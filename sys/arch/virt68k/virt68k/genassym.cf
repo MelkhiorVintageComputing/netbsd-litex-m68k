@@ -42,6 +42,7 @@ include <sys/syscall.h>
 include <uvm/uvm_extern.h>
 
 include <machine/cpu.h>
+include <virt68k/virt68k/cpu_mp.h>
 include <machine/fcode.h>
 include <machine/psl.h>
 include <machine/pcb.h>
@@ -108,6 +109,9 @@ define	CI_CURPCB		offsetof(struct cpu_info, ci_curpcb)
 define	CI_ASTPENDING		offsetof(struct cpu_info, ci_astpending)
 define	CI_TMPSTK		offsetof(struct cpu_info, ci_tmpstk)
 define	VB_CI			offsetof(struct m68k_vecblk, vb_ci)
+define	HATCH_CI		offsetof(struct virt68k_hatch, h_ci)
+define	HATCH_SP		offsetof(struct virt68k_hatch, h_sp)
+define	HATCH_VBR		offsetof(struct virt68k_hatch, h_vbr)
 endif
 
 # PSL values (should just include psl.h?)

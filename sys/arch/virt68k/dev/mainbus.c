@@ -223,6 +223,14 @@ mainbus_attach_other(struct bi_record *bi, void *v)
 		}
 		break;
 
+	case BI_VIRT_SMP_BASE:
+		ma.ma_compatible = "netbsd,qemu-virt-smp";	/* XXX */
+		ma.ma_addr = vd->vd_mmio_base;
+		ma.ma_size = 0x1000;
+		ma.ma_irq  = -1;	/* vd_irq_base is the number of CPUs */
+		config_found(self, &ma, mainbus_print, CFARGS_NONE);
+		break;
+
 	case BI_VIRT_CTRL_BASE:
 		ma.ma_compatible = "netbsd,qemu-virt-ctrl";	/* XXX */
 		ma.ma_addr = vd->vd_mmio_base;

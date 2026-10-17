@@ -171,6 +171,7 @@ gfrtc*		at mainbus? addr ?	# real-time clock / timer
 
 # Qemu Virtual System Controller
 virtctrl*	at mainbus? addr ?
+virtsmp*	at mainbus? addr ?	# SMP controller (-smp N)
 
 # VirtIO devices
 virtio*		at mainbus? addr ?	# VirtIO nexus

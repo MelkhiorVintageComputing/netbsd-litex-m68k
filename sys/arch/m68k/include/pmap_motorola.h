@@ -78,10 +78,19 @@
 
 #ifdef _KERNEL_OPT
 #include "opt_m68k_arch.h"
+#include "opt_multiprocessor.h"
 #endif
 
 #include <machine/cpu.h>
 #include <machine/pte.h>
+
+#if defined(_KERNEL) && defined(MULTIPROCESSOR)
+/* TLB shootdown (pmap_motorola.c); the port provides m68k_send_tlb_ipi() */
+#define	PMAP_TLB_ALL	((vaddr_t)-1)
+void	pmap_tlb_shootdown(vaddr_t);
+void	pmap_tlb_shootdown_ipi(void);
+void	m68k_send_tlb_ipi(struct cpu_info *);
+#endif
 
 /*
  * Pmap stuff

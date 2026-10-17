@@ -589,6 +589,77 @@ Laststkadj:
 	movl	%sp@,%sp		| and our SP
 	rte				| and do real RTE
 
+#ifdef MULTIPROCESSOR
+/*
+ * Interrupts from virtsmp(4): IPIs and the per-CPU timer (IPL 6).
+ */
+ENTRY_NOPROFILE(intrhand_virtsmp_ipi)
+	INTERRUPT_SAVEREG
+	GETCURCPU(%a0)
+	addql	#1,%a0@(CI_IDEPTH)
+	jbsr	_C_LABEL(virtsmp_ipi_intr)
+	GETCURCPU(%a0)
+	subql	#1,%a0@(CI_IDEPTH)
+	INTERRUPT_RESTOREREG
+	jra	_ASM_LABEL(rei)
+
+ENTRY_NOPROFILE(intrhand_virtsmp_timer)
+	INTERRUPT_SAVEREG
+	GETCURCPU(%a0)
+	addql	#1,%a0@(CI_IDEPTH)
+	jbsr	_C_LABEL(virtsmp_clock_intr)	| (takes the clockframe)
+	GETCURCPU(%a0)
+	subql	#1,%a0@(CI_IDEPTH)
+	INTERRUPT_RESTOREREG
+	jra	_ASM_LABEL(rei)
+
+/*
+ * Secondary CPUs start here (virtsmp START_PC), with the MMU off,
+ * SR = 0x2700, %a0 = struct virt68k_hatch * and %sp = its h_stack.
+ * The kernel is mapped VA == PA, so its symbols can be used directly.
+ * Enable the MMU like the boot CPU did (68040/68060 only), load our
+ * VBR, switch to the stack of our idle lwp and call cpu_hatch(ci).
+ */
+ENTRY_NOPROFILE(cpu_spinup_trampoline)
+	movw	#PSL_HIGHIPL,%sr
+	movl	%a0,%a5				| hatch
+	movl	#CACHE_OFF,%d0
+	movc	%d0,%cacr
+	moveq	#FC_USERD,%d0
+	movc	%d0,%sfc
+	movc	%d0,%dfc
+	movl	_C_LABEL(Sysseg_pa),%d1
+	.long	0x4e7b1807			| movc d1,srp
+	.long	0x4e7b1806			| movc d1,urp
+	pea	_C_LABEL(mmu_tt40)
+	jbsr	_C_LABEL(mmu_load_tt40)
+	addql	#4,%sp
+	.word	0xf4d8				| cinva bc
+	.word	0xf518				| pflusha
+	movl	#MMU40_TCR_BITS,%d0
+	.long	0x4e7b0003			| movc d0,tc
+#ifdef M68060
+	cmpl	#CPU_68060,_C_LABEL(cputype)
+	jne	1f
+	movl	#1,%d0
+	.long	0x4e7b0808			| movcl d0,pcr
+	movl	#0xa0808000,%d0
+	movc	%d0,%cacr
+	jra	2f
+1:
+#endif
+	movl	#0x80008000,%d0
+	movc	%d0,%cacr
+2:	movl	%a5@(HATCH_VBR),%a0
+	movc	%a0,%vbr
+	movl	%a5@(HATCH_SP),%sp
+	movl	#USRSTACK-4,%a2
+	movl	%a2,%usp
+	movl	%a5@(HATCH_CI),%sp@-
+	jbsr	_C_LABEL(cpu_hatch)		| does not return
+	PANIC("cpu_hatch returned")
+#endif /* MULTIPROCESSOR */
+
 /*
  * Primitives
  */

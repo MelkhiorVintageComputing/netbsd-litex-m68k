@@ -43,8 +43,11 @@ __KERNEL_RCSID(0, "$NetBSD$");
 #include <sys/lwp.h>
 #include <sys/xcall.h>
 
+#include <uvm/uvm_extern.h>
+
 #include <machine/cpu.h>
 #include <machine/intr.h>
+#include <machine/pmap.h>
 
 #include <virt68k/virt68k/cpu_mp.h>
 
@@ -57,6 +60,12 @@ cpu_send_ipi(struct cpu_info *ci, u_int ipi)
 	KASSERT(ci != curcpu());
 	if (virt68k_ipi_send != NULL)
 		(*virt68k_ipi_send)(ci, ipi);
+}
+
+void
+m68k_send_tlb_ipi(struct cpu_info *ci)
+{
+	cpu_send_ipi(ci, VIRT68K_IPI_TLB);
 }
 
 void
@@ -117,6 +126,8 @@ cpu_ipi(struct cpu_info *ci)
 void
 virt68k_ipi_dispatch(u_int pending)
 {
+	if (pending & (1u << VIRT68K_IPI_TLB))
+		pmap_tlb_shootdown_ipi();
 	if (pending & (1u << VIRT68K_IPI_AST)) {
 		/* curcpu()->ci_astpending was set by the sender */
 	}
