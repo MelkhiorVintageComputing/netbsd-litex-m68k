@@ -59,7 +59,9 @@ __KERNEL_RCSID(0, "$NetBSD: m68k_trap.c,v 1.4 2024/01/20 00:15:31 thorpej Exp $"
 
 extern int suline(void *, void *);	/* locore.s */
 
+#ifndef MULTIPROCESSOR		/* else ci_astpending */
 volatile int astpending;
+#endif
 
 #ifdef M68060
 #define	KDFAULT_060(c)	(cputype == CPU_68060 && ((c) & FSLW_TM_SV))

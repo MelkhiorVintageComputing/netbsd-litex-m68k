@@ -70,7 +70,9 @@ typedef struct {
 
 #ifndef _LOCORE
 
+#ifndef MULTIPROCESSOR		/* else a macro in <m68k/cpu.h> */
 extern volatile unsigned int intr_depth;/* interrupt depth */
+#endif
 extern const uint16_t ipl2psl_table[NIPL];
 
 typedef int ipl_t;		/* logical IPL_* value */

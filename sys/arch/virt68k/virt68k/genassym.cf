@@ -101,6 +101,14 @@ define	P_VMSPACE		offsetof(struct proc, p_vmspace)
 
 # interrupt/fault metering
 define	CI_NINTR		offsetof(struct cpu_info, ci_data.cpu_nintr)
+define	CI_IDEPTH		offsetof(struct cpu_info, ci_idepth)
+ifdef MULTIPROCESSOR
+define	CI_CURLWP		offsetof(struct cpu_info, ci_curlwp)
+define	CI_CURPCB		offsetof(struct cpu_info, ci_curpcb)
+define	CI_ASTPENDING		offsetof(struct cpu_info, ci_astpending)
+define	CI_TMPSTK		offsetof(struct cpu_info, ci_tmpstk)
+define	VB_CI			offsetof(struct m68k_vecblk, vb_ci)
+endif
 
 # PSL values (should just include psl.h?)
 define	PSL_S			PSL_S

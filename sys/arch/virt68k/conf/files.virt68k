@@ -39,6 +39,7 @@ file arch/virt68k/virt68k/clock.c
 file arch/virt68k/virt68k/disksubr.c
 file arch/virt68k/virt68k/intr.c
 file arch/virt68k/virt68k/machdep.c
+file arch/virt68k/virt68k/cpu_mp.c		multiprocessor
 file arch/virt68k/virt68k/pmap_bootstrap.c	compile-with "${NOPROF_C}"
 file arch/virt68k/virt68k/trap.c
 file arch/m68k/m68k/cacheops.c

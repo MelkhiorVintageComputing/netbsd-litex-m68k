@@ -67,6 +67,8 @@
  * copyin/copyout, ufetch/ustore, etc.
  */
 
+#include "opt_multiprocessor.h"
+
 #include <sys/errno.h>
 #include <machine/asm.h>
 
@@ -75,10 +77,13 @@
 	.file	"copy.s"
 	.text
 
+#ifndef MULTIPROCESSOR		/* else per-CPU, from <machine/asm.h> */
+#undef	GETCURPCB
 #ifdef CI_CURPCB
 #define	GETCURPCB(r)	movl	_C_LABEL(cpu_info_store)+CI_CURPCB,r
 #else
 #define	GETCURPCB(r)	movl	_C_LABEL(curpcb),r
+#endif
 #endif
 
 #ifdef	DIAGNOSTIC

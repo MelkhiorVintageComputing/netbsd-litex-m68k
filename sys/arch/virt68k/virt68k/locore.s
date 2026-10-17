@@ -45,6 +45,7 @@
 #include "opt_kgdb.h"
 #include "opt_lockdebug.h"
 #include "opt_m68k_arch.h"
+#include "opt_multiprocessor.h"
 
 #include "assym.h"
 #include <machine/asm.h>
@@ -109,6 +110,15 @@ ASENTRY_NOPROFILE(start)
 	lsrl	#2,%d0
 1:	clrl	%a0@+
 	dbra	%d0,1b
+
+#ifdef MULTIPROCESSOR
+	/*
+	 * curcpu() is found through the VBR: point it at the boot CPU's
+	 * vector block right away (the kernel runs at VA == PA).
+	 */
+	RELOC(vectab,%a0)
+	movc	%a0,%vbr
+#endif
 
 	/* XXX XXX XXX */
 	movl	#CACHE_OFF,%d0
@@ -214,6 +224,10 @@ Lmmuenabled:
  */
 	lea	_ASM_LABEL(tmpstk),%sp	| re-load the temporary stack
 	jbsr	_C_LABEL(vec_init)	| initialize the vector table
+#ifdef MULTIPROCESSOR
+	GETCURCPU(%a0)			| tmpstk is the boot CPU's
+	movl	%sp,%a0@(CI_TMPSTK)	|   scratch stack
+#endif
 /* call final pmap setup */
 	jbsr	_C_LABEL(pmap_bootstrap_finalize)
 /* set kernel stack, user SP */
@@ -321,7 +335,7 @@ ENTRY_NOPROFILE(fpfault)
 	movl	%usp,%a0	| and save
 	movl	%a0,%sp@(FR_SP)	|   the user stack pointer
 	clrl	%sp@-		| no VA arg
-	movl	_C_LABEL(curpcb),%a0 | current pcb
+	GETCURPCB(%a0)		| current pcb
 	lea	%a0@(PCB_FPCTX),%a0 | address of FP savearea
 	fsave	%a0@		| save state
 #if defined(M68040) || defined(M68060)
@@ -364,7 +378,12 @@ ENTRY_NOPROFILE(trap0)
 	movl	%d0,%sp@-		| push syscall number
 	jbsr	_C_LABEL(syscall)	| handle it
 	addql	#4,%sp			| pop syscall arg
+#ifdef MULTIPROCESSOR
+	GETCURCPU(%a0)			| (a0 is restored below)
+	tstl	%a0@(CI_ASTPENDING)	| AST pending?
+#else
 	tstl	_C_LABEL(astpending)	| AST pending?
+#endif
 	jne	Lrei1			| Yup, go deal with it.
 	movl	%sp@(FR_SP),%a0		| grab and restore
 	movl	%a0,%usp		|   user SP
@@ -378,7 +397,7 @@ ENTRY_NOPROFILE(trap0)
  * command in d0, addr in a1, length in d1
  */
 ENTRY_NOPROFILE(trap12)
-	movl	_C_LABEL(curlwp),%a0
+	GETCURLWP(%a0)
 	movl	%a0@(L_PROC),%sp@-	| push current proc pointer
 	movl	%d1,%sp@-		| push length
 	movl	%a1,%sp@-		| push addr
@@ -498,11 +517,21 @@ Lbrkpt3:
  */
 
 ENTRY_NOPROFILE(intrhand_autovec)
+#ifdef MULTIPROCESSOR
+	INTERRUPT_SAVEREG
+	GETCURCPU(%a0)
+	addql	#1,%a0@(CI_IDEPTH)
+	jbsr	_C_LABEL(intr_dispatch)	| call dispatcher
+	GETCURCPU(%a0)
+	subql	#1,%a0@(CI_IDEPTH)
+	INTERRUPT_RESTOREREG
+#else
 	addql	#1,_C_LABEL(intr_depth)
 	INTERRUPT_SAVEREG
 	jbsr	_C_LABEL(intr_dispatch)	| call dispatcher
 	INTERRUPT_RESTOREREG
 	subql	#1,_C_LABEL(intr_depth)
+#endif
 
 	/* FALLTHROUGH to rei */
 
@@ -518,7 +547,14 @@ ENTRY_NOPROFILE(intrhand_autovec)
  * necessitating a stack cleanup.
  */
 ASENTRY_NOPROFILE(rei)
+#ifdef MULTIPROCESSOR
+	movl	%a0,%sp@-		| all registers are live here
+	GETCURCPU(%a0)
+	tstl	%a0@(CI_ASTPENDING)	| AST pending?
+	movl	%sp@+,%a0		| (movea does not change the CCR)
+#else
 	tstl	_C_LABEL(astpending)	| AST pending?
+#endif
 	jeq	Ldorte			| Nope. Just return.
 	btst	#5,%sp@			| Returning to kernel mode?
 	jne	Ldorte			| Yup. Can't do ASTs
@@ -566,7 +602,7 @@ Laststkadj:
 #if defined(M68040) || defined(M68060)
 ENTRY(suline)
 	movl	%sp@(4),%a0		| address to write
-	movl	_C_LABEL(curpcb),%a1	| current pcb
+	GETCURPCB(%a1)			| current pcb
 	movl	#Lslerr,%a1@(PCB_ONFAULT) | where to return to on a fault
 	movl	%sp@(8),%a1		| address of line
 	movl	%a1@+,%d0		| get lword
@@ -586,7 +622,7 @@ ENTRY(suline)
 Lslerr:
 	moveq	#-1,%d0
 Lsldone:
-	movl	_C_LABEL(curpcb),%a1	| current pcb
+	GETCURPCB(%a1)			| current pcb
 	clrl	%a1@(PCB_ONFAULT)	| clear fault address
 	rts
 #endif

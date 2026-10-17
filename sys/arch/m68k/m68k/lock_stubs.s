@@ -30,6 +30,7 @@
  */
 
 #include "opt_lockdebug.h"
+#include "opt_multiprocessor.h"
 
 #include <machine/asm.h>
 
@@ -89,7 +90,12 @@ STRONG_ALIAS(_atomic_cas_ulong_ni,_atomic_cas_32)
  */
 ENTRY(mutex_enter)
 	movq	#0,%d0
+#ifdef MULTIPROCESSOR
+	GETCURLWP(%a1)
+	movl	%a1,%d1
+#else
 	movl	_C_LABEL(curlwp),%d1
+#endif
 	movl	4(%sp),%a0
 	casl	%d0,%d1,(%a0)
 	bnes	1f
@@ -100,7 +106,12 @@ ENTRY(mutex_enter)
  * void mutex_exit(kmutex_t *mtx);
  */
 ENTRY(mutex_exit)
+#ifdef MULTIPROCESSOR
+	GETCURLWP(%a1)
+	movl	%a1,%d0
+#else
 	movl	_C_LABEL(curlwp),%d0
+#endif
 	movq	#0,%d1
 	movl	4(%sp),%a0
 	casl	%d0,%d1,(%a0)

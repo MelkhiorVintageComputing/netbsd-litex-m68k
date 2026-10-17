@@ -126,7 +126,16 @@
 
 #ifdef _KERNEL
 
-extern void *vectab[NVECTORS];
+#if defined(_KERNEL_OPT)
+#include "opt_multiprocessor.h"
+#endif
+#ifdef MULTIPROCESSOR
+/* followed by the cpu_info pointer of the boot CPU, see <m68k/cpu.h> */
+#define	VECTAB_SIZE	(NVECTORS + 1)
+#else
+#define	VECTAB_SIZE	NVECTORS
+#endif
+extern void *vectab[VECTAB_SIZE];
 extern void **saved_vbr;
 
 void	vec_init(void);

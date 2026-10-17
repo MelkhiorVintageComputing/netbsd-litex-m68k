@@ -131,7 +131,9 @@ __CTASSERT(__arraycount(intr_evcnt) == NIRQ);
 #define	IRQ_TO_IPL(x)	 ((IRQ_TO_IHLIST(x) >> 5) + 1)
 static LIST_HEAD(intrhand_list, intrhand) intrhands[IHLIST_COUNT];
 
+#ifndef MULTIPROCESSOR		/* else ci_idepth */
 volatile unsigned int	intr_depth;	/* used in locore.s */
+#endif
 
 static struct gfpic_softc *pics[NPIC];
 

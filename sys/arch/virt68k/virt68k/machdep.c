@@ -88,6 +88,7 @@ __KERNEL_RCSID(0, "$NetBSD: machdep.c,v 1.9.4.1 2025/11/21 09:53:25 martin Exp $
 #include <machine/psl.h>
 #include <machine/pte.h>
 #include <machine/vmparam.h>
+#include <machine/vectors.h>
 #include <m68k/include/cacheops.h>
 #include <dev/cons.h>
 #include <dev/mm.h>
@@ -103,8 +104,17 @@ __KERNEL_RCSID(0, "$NetBSD: machdep.c,v 1.9.4.1 2025/11/21 09:53:25 martin Exp $
 /* the following is used externally (sysctl_hw) */
 char	machine[] = MACHINE;	/* from <machine/param.h> */
 
+#ifdef MULTIPROCESSOR
+/* The boot CPU; the others are allocated when they attach. */
+struct cpu_info cpu_info_store = {
+	.ci_self = &cpu_info_store,
+	.ci_vectors = vectab,
+};
+struct cpu_info *cpu_info_list = &cpu_info_store;
+#else
 /* Our exported CPU info; we can have only one. */  
 struct cpu_info cpu_info_store;
+#endif
 
 struct vm_map *phys_map = NULL;
 

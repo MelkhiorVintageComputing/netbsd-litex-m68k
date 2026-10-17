@@ -204,9 +204,41 @@
 	9:	.asciz	x			;	\
 		.even
 
+/*
+ * Access to the per-CPU state.  "ar" must be an address register.
+ * With MULTIPROCESSOR, the cpu_info pointer follows the vector table of
+ * the CPU (see <m68k/cpu.h>).  Offsets (VB_CI, CI_*) come from assym.h.
+ */
+#ifdef MULTIPROCESSOR
+#define	GETCURCPU(ar)						\
+	movc	%vbr,ar;					\
+	movl	ar@(VB_CI),ar
+#define	GETCURLWP(ar)						\
+	GETCURCPU(ar);						\
+	movl	ar@(CI_CURLWP),ar
+#define	GETCURPCB(ar)						\
+	GETCURCPU(ar);						\
+	movl	ar@(CI_CURPCB),ar
+#else
+#define	GETCURCPU(ar)						\
+	lea	_C_LABEL(cpu_info_store),ar
+#define	GETCURLWP(ar)						\
+	movl	_C_LABEL(curlwp),ar
+#define	GETCURPCB(ar)						\
+	movl	_C_LABEL(curpcb),ar
+#endif
+
 /* 64-bit counter increments */
+#ifdef MULTIPROCESSOR
+#define	CPUINFO_COUNTER(n)					\
+	GETCURCPU(%a1);						\
+	lea	(n)+4(%a1),%a1
+#else
+#define	CPUINFO_COUNTER(n)					\
+	lea	_C_LABEL(cpu_info_store)+(n)+4,%a1
+#endif
 #define CPUINFO_INCREMENT(n)					\
-	lea	_C_LABEL(cpu_info_store)+(n)+4,%a1;		\
+	CPUINFO_COUNTER(n);					\
 	addq.l	#1,(%a1);					\
 	clr.l	%d0;		/* doesn't change CCR[X] */	\
 	move.l	-(%a1),%d1;	/* doesn't change CCR[X] */	\
@@ -215,7 +247,7 @@
 
 /* 64-bit counter increments */
 #define CPUINFO_ADD(n, addend)					\
-	lea	_C_LABEL(cpu_info_store)+(n)+4,%a1;		\
+	CPUINFO_COUNTER(n);					\
 	add.l	addend,(%a1);					\
 	clr.l	%d0;		/* doesn't change CCR[X] */	\
 	move.l	-(%a1),%d1;	/* doesn't change CCR[X] */	\

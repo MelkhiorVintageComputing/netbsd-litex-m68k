@@ -69,7 +69,9 @@
  */
 
 	.data
+#ifndef MULTIPROCESSOR		/* else ci_curpcb */
 GLOBAL(curpcb)
+#endif
 GLOBAL(masterpaddr)		| XXXcompatibility (debuggers)
 	.long	0
 
@@ -133,9 +135,15 @@ ENTRY(cpu_switchto)
 #endif	/* !_M68K_CUSTOM_FPU_CTX */
 
 	movl	8(%sp),%a0		| get newlwp
-	movl	%a0,_C_LABEL(curlwp)	| curlwp = new lwp
 	movl	L_PCB(%a0),%a1		| get its pcb
+#ifdef MULTIPROCESSOR
+	GETCURCPU(%a2)			| (a2 was saved above)
+	movl	%a0,%a2@(CI_CURLWP)	| curlwp = new lwp
+	movl	%a1,%a2@(CI_CURPCB)	| curpcb = new pcb
+#else
+	movl	%a0,_C_LABEL(curlwp)	| curlwp = new lwp
 	movl	%a1,_C_LABEL(curpcb)	| curpcb = new pcb
+#endif
 
 	/*
 	 * Check for restartable atomic sequences (RAS)
@@ -151,16 +159,21 @@ ENTRY(cpu_switchto)
 	movql	#-1,%d0
 	cmpl	%a0,%d0			| a0 == -1?
 	jeq	1f			| yes, skip it.
-	movl	_C_LABEL(curlwp),%a1
+	GETCURLWP(%a1)
 	movl	L_MD_REGS(%a1),%a1
 	movl	%a0,TF_PC(%a1)		| fixup return PC
 1:
-	movl	_C_LABEL(curlwp),%a0	| recover new lwp
-	movl	_C_LABEL(curpcb),%a1	| recover new pcb
+	GETCURLWP(%a0)			| recover new lwp
+	GETCURPCB(%a1)			| recover new pcb
 2:
 	movl	%a0,%d0			| free up %a0
 	movl	4(%sp),%d1		| get oldlwp for return value
+#ifdef MULTIPROCESSOR
+	GETCURCPU(%a2)
+	movl	%a2@(CI_TMPSTK),%sp	| switch to tmp stack in case of NMI
+#else
 	lea	_ASM_LABEL(tmpstk),%sp	| switch to tmp stack in case of NMI
+#endif
 
 	moveml	PCB_REGS(%a1),%d2-%d7/%a2-%a7 | restore registers
 	movl	PCB_USP(%a1),%a0

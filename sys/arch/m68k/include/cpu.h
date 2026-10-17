@@ -43,6 +43,7 @@
 
 #if defined(_KERNEL_OPT)
 #include "opt_m68k_arch.h"	/* XXX Should not do this here. */
+#include "opt_multiprocessor.h"
 #endif
 
 /*
@@ -124,15 +125,64 @@ struct cpu_info {
 	volatile int	ci_want_resched;
 	volatile int	ci_idepth;
 	struct lwp *ci_onproc;		/* current user LWP / kthread */
+#ifdef MULTIPROCESSOR
+	struct cpu_info *ci_self;	/* this structure */
+	struct lwp *ci_curlwp;		/* replaces the curlwp global */
+	struct pcb *ci_curpcb;		/* replaces the curpcb global */
+	volatile int ci_astpending;	/* replaces the astpending global */
+	void	*ci_tmpstk;		/* top of the scratch stack used by
+					   cpu_switchto() */
+	void	**ci_vectors;		/* vector table (what VBR points to) */
+	struct cpu_info *ci_next;	/* list of all CPUs */
+	void	*ci_md;			/* port-specific per-CPU data */
+#endif
 };
 #endif /* _KERNEL || _KMEMUSER */
+
+#ifdef MULTIPROCESSOR
+/*
+ * Each CPU has its own vector table.  The VBR points to it, and the
+ * pointer to the cpu_info of the CPU follows the table, so that
+ * curcpu() is "movec %vbr,%aN; movl %aN@(M68K_VECBLK_CI),%aN".
+ */
+#define	M68K_NVECTORS		256
+#define	M68K_VECBLK_CI		(M68K_NVECTORS * 4)
+#if defined(_KERNEL) && !defined(_LOCORE)
+struct m68k_vecblk {			/* (the boot CPU uses vectab[]) */
+	void		*vb_vectors[M68K_NVECTORS];
+	struct cpu_info	*vb_ci;
+};
+#endif
+#endif /* MULTIPROCESSOR */
 
 #ifdef _KERNEL
 extern struct cpu_info cpu_info_store;
 
 struct	proc;
+struct	lwp;
 void	cpu_proc_fork(struct proc *, struct proc *);
 
+#ifdef MULTIPROCESSOR
+static __inline struct cpu_info *
+m68k_curcpu(void)
+{
+	struct cpu_info *ci;
+
+	__asm volatile("movc %%vbr,%0; movl %0@(%c1),%0"
+	    : "=a" (ci) : "i" (M68K_VECBLK_CI));
+	return ci;
+}
+#define	curcpu()	m68k_curcpu()
+#define	cpu_number()	(curcpu()->ci_cpuid)
+
+extern struct cpu_info *cpu_info_list;
+#define	CPU_INFO_ITERATOR	int __unused
+#define	CPU_INFO_FOREACH(cii, ci)	\
+	ci = cpu_info_list; ci != NULL; ci = ci->ci_next
+#define	CPU_IS_PRIMARY(ci)	((ci) == &cpu_info_store)
+
+void	cpu_boot_secondary_processors(void);
+#else
 #define	curcpu()	(&cpu_info_store)
 
 /*
@@ -140,6 +190,7 @@ void	cpu_proc_fork(struct proc *, struct proc *);
  * referenced in generic code
  */
 #define cpu_number()			0
+#endif /* MULTIPROCESSOR */
 
 #define LWP_PC(l)	(((struct trapframe *)((l)->l_md.md_regs))->tf_pc)
 
@@ -184,7 +235,11 @@ struct clockframe {
  * (Remember, the clock interrupt handler itself will cause the
  * depth counter to be incremented).
  */
+#ifdef MULTIPROCESSOR
+#define	intr_depth		(curcpu()->ci_idepth)
+#else
 extern volatile unsigned int intr_depth;
+#endif
 #define	CLKF_INTR(framep)	(intr_depth > 1)
 #endif
 
@@ -192,6 +247,17 @@ extern volatile unsigned int intr_depth;
 #define	cpu_set_hw_ast(l)	__nothing
 #endif
 
+#ifdef MULTIPROCESSOR
+#define	astpending		(curcpu()->ci_astpending)
+/* Request an AST on the CPU running l; see cpu_need_resched(). */
+void	cpu_set_ast(struct lwp *);
+/*
+ * Preempt the current process if in interrupt from user mode,
+ * or after the current trap/syscall if in system mode.  For another
+ * CPU, this sends it an IPI.
+ */
+void	cpu_need_resched(struct cpu_info *, struct lwp *, int);
+#else
 extern volatile int astpending;
 #define	cpu_set_ast(l)							\
 	do {								\
@@ -206,6 +272,7 @@ extern volatile int astpending;
 	do {								\
 		__USE(ci); __USE(flags); cpu_set_ast(l);		\
 	} while (/*CONSTCOND*/0)
+#endif /* MULTIPROCESSOR */
 
 /*
  * Give a profiling tick to the current process when the user profiling

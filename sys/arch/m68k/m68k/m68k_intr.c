@@ -70,7 +70,9 @@ extern char intrstub_vectored[];
 /* A dummy event counter where interrupt stats go to die. */
 static struct evcnt bitbucket;
 
+#ifndef MULTIPROCESSOR		/* else ci_idepth */
 volatile unsigned int intr_depth;	/* updated in assembly glue */
+#endif
 
 static struct m68k_intrhand_list m68k_intrhands_autovec[NAUTOVECTORS];
 #ifdef __HAVE_M68K_INTR_VECTORED

@@ -259,7 +259,10 @@ extern char FP_CALL_TOP[], I_CALL_TOP[];
 #define	UNIMP_II_HANDLER	badtrap
 #endif
 
-void *vectab[NVECTORS] = {
+void *vectab[VECTAB_SIZE] = {
+#ifdef MULTIPROCESSOR
+	[NVECTORS]		=	&cpu_info_store,
+#endif
 	[VECI_RIISP]		=	MACHINE_RESET_SP,
 	[VECI_RIPC]		=	MACHINE_RESET_PC,
 	[VECI_BUSERR]		=	BUSERR_HANDLER,
@@ -615,6 +618,18 @@ vec_set_entry(int vec, void *addr)
 	KASSERT(vec >= 0);
 	KASSERT(vec < NVECTORS);
 	vectab[vec] = addr;
+#ifdef MULTIPROCESSOR
+	/* and in the private copies of the other CPUs */
+	{
+		CPU_INFO_ITERATOR cii;
+		struct cpu_info *ci;
+
+		for (CPU_INFO_FOREACH(cii, ci)) {
+			if (ci->ci_vectors != NULL && ci->ci_vectors != vectab)
+				ci->ci_vectors[vec] = addr;
+		}
+	}
+#endif
 #if defined(M68040) || defined(M68060)
 	if (cputype == CPU_68040 || cputype == CPU_68060) {
 		DCIS();

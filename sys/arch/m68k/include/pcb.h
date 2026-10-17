@@ -70,6 +70,13 @@ struct md_coredump {
 	int	md_exec[16];	/* exec structure for HP-UX core dumps */
 };
 
+#if defined(_KERNEL_OPT)
+#include "opt_multiprocessor.h"
+#endif
+#ifdef MULTIPROCESSOR
+#define	curpcb		(curcpu()->ci_curpcb)
+#else
 extern struct pcb *curpcb;
+#endif
 
 #endif /* _M68K_PCB_H_ */
