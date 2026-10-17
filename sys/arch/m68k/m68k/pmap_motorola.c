@@ -368,8 +368,8 @@ void
 pmap_tlb_shootdown(vaddr_t va)
 {
 	CPU_INFO_ITERATOR cii;
-	struct cpu_info *ci, *self;
-	u_int n;
+	struct cpu_info *ci, *self, *targets[MAXCPUS];
+	u_int n, i;
 	int s;
 
 	if (kcpuset_running == NULL || kcpuset_countset(kcpuset_running) < 2)
@@ -380,17 +380,19 @@ pmap_tlb_shootdown(vaddr_t va)
 	while (!__cpu_simple_lock_try(&pmap_tlb_lock))
 		continue;
 	self = curcpu();
-	n = 0;
 	pmap_tlb_va = va;
+	/*
+	 * Snapshot the targets once: CPUs may join kcpuset_running while we
+	 * are here, and the count must match the IPIs sent.
+	 */
+	n = 0;
 	for (CPU_INFO_FOREACH(cii, ci)) {
 		if (ci != self && kcpuset_isset(kcpuset_running, cpu_index(ci)))
-			n++;
+			targets[n++] = ci;
 	}
 	pmap_tlb_pending = n;
-	for (CPU_INFO_FOREACH(cii, ci)) {
-		if (ci != self && kcpuset_isset(kcpuset_running, cpu_index(ci)))
-			m68k_send_tlb_ipi(ci);
-	}
+	for (i = 0; i < n; i++)
+		m68k_send_tlb_ipi(targets[i]);
 	while (pmap_tlb_pending != 0)
 		continue;
 	__cpu_simple_unlock(&pmap_tlb_lock);

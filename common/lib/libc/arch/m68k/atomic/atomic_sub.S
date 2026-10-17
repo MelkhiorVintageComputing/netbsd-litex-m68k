@@ -35,9 +35,16 @@
 	.align	2
 
 ENTRY(_atomic_sub_32)
+	/*
+	 * A read-modify-write instruction is only atomic with respect to
+	 * interrupts; with several CPUs it must be a CAS loop.
+	 */
 	movl	4(%sp), %a0
-	movl	8(%sp), %d0
-	subl	%d0, (%a0)
+1:	movl	(%a0), %d0
+	movl	%d0, %d1
+	subl	8(%sp), %d1
+	casl	%d0, %d1, (%a0)
+	bne	1b
 	rts
 END(_atomic_sub_32)
 ATOMIC_OP_ALIAS(atomic_sub_32,_atomic_sub_32)
