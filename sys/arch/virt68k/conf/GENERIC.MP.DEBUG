@@ -1,0 +1,8 @@
+# $NetBSD$
+#
+# GENERIC.MP with lock and consistency checking, for MP debugging.
+
+include "arch/virt68k/conf/GENERIC.MP"
+
+options 	DIAGNOSTIC
+options 	LOCKDEBUG

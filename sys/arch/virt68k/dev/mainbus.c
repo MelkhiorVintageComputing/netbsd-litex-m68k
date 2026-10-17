@@ -102,6 +102,32 @@ mainbus_match(device_t parent __unused, cfdata_t cf __unused,
 	return (mainbus_matched = 1);
 }
 
+/*
+ * The SMP controller attaches the secondary CPUs: this must happen
+ * before any driver that sizes per-CPU data with ncpu (workqueue(9),
+ * for instance), so it is attached before everything else.
+ */
+static bool
+mainbus_attach_smp(struct bi_record *bi, void *v)
+{
+	struct mainbus_attach_args ma = {
+		.ma_st = &_mainbus_space_tag,
+		.ma_dmat = &_mainbus_dma_tag,
+	};
+	device_t self = v;
+	struct bi_virt_dev *vd = bootinfo_dataptr(bi);
+
+	if (bi->bi_tag == BI_VIRT_SMP_BASE) {
+		ma.ma_compatible = "netbsd,qemu-virt-smp";	/* XXX */
+		ma.ma_addr = vd->vd_mmio_base;
+		ma.ma_size = 0x1000;
+		ma.ma_irq  = -1;	/* vd_irq_base is the number of CPUs */
+		config_found(self, &ma, mainbus_print, CFARGS_NONE);
+		return false;	/* done searching */
+	}
+	return true;		/* keep searching */
+}
+
 static bool
 mainbus_attach_gfpic(struct bi_record *bi, void *v)
 {
@@ -224,11 +250,7 @@ mainbus_attach_other(struct bi_record *bi, void *v)
 		break;
 
 	case BI_VIRT_SMP_BASE:
-		ma.ma_compatible = "netbsd,qemu-virt-smp";	/* XXX */
-		ma.ma_addr = vd->vd_mmio_base;
-		ma.ma_size = 0x1000;
-		ma.ma_irq  = -1;	/* vd_irq_base is the number of CPUs */
-		config_found(self, &ma, mainbus_print, CFARGS_NONE);
+		/* Handled first, see mainbus_attach_smp(). */
 		break;
 
 	case BI_VIRT_CTRL_BASE:
@@ -259,7 +281,10 @@ mainbus_attach(device_t parent __unused, device_t self, void *args __unused)
 	    (mmutype == MMU_68040) ? _bus_dmamap_sync_0460
 				   : _bus_dmamap_sync_030;
 
-	/* Attach the PICs first. */
+	/* The CPUs first. */
+	bootinfo_enumerate(mainbus_attach_smp, self);
+
+	/* Then the PICs. */
 	bootinfo_enumerate(mainbus_attach_gfpic, self);
 
 	/* Attach the reset of the Goldfish devices next. */
