@@ -145,6 +145,7 @@ virt68k_ipi_dispatch(u_int pending)
 void
 cpu_boot_secondary_processors(void)
 {
+	pmap_mp_attach_evcnt();
 	/* virtsmp(4) starts them; nothing without it */
 	if (virt68k_boot_secondaries != NULL)
 		(*virt68k_boot_secondaries)();

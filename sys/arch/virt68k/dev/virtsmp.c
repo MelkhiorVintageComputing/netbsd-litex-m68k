@@ -73,6 +73,10 @@ struct virtsmp_softc {
 
 static struct virtsmp_softc *virtsmp_sc;
 
+#ifdef __HAVE_CPU_COUNTER
+volatile uint32_t *virt68k_counter_reg;	/* <machine/cpu_counter.h> */
+#endif
+
 static const struct device_compatible_entry compat_data[] = {
 	{ .compat = "netbsd,qemu-virt-smp" },
 	DEVICE_COMPAT_EOL
@@ -275,6 +279,10 @@ virtsmp_attach(device_t parent, device_t self, void *aux)
 	sc->sc_tc.tc_quality = 100;
 	sc->sc_tc.tc_priv = sc;
 	tc_init(&sc->sc_tc);
+#ifdef __HAVE_CPU_COUNTER
+	virt68k_counter_reg = (volatile uint32_t *)
+	    (sc->sc_bsh + VIRTSMP_COUNTER_LO);
+#endif
 
 #ifdef MULTIPROCESSOR
 	u_int n;

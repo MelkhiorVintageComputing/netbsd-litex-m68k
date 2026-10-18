@@ -46,6 +46,7 @@ __KERNEL_RCSID(0, "$NetBSD: trap.c,v 1.4 2024/09/23 10:43:33 rin Exp $");
 #include "opt_kgdb.h"
 #include "opt_compat_sunos.h"
 #include "opt_m68k_arch.h"
+#include "opt_multiprocessor.h"
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -565,6 +566,15 @@ trap(struct frame *fp, int type, unsigned int code, unsigned int v)
 			goto dopanic;
 		}
 
+#ifdef MULTIPROCESSOR
+		/* a stale ATC entry of a kernel mapping made on another CPU */
+		if (map == kernel_map &&
+		    pmap_fault_fixup(pmap_kernel(), va, ftype)) {
+			rv = 0;
+			goto fixedup;
+		}
+#endif
+
 #ifdef DIAGNOSTIC
 		if (intr_depth && !panicking) {
 			printf("trap: calling uvm_fault() from interrupt!\n");
@@ -579,6 +589,9 @@ trap(struct frame *fp, int type, unsigned int code, unsigned int v)
 		if (rv && MDB_ISPID(p->p_pid))
 			printf("uvm_fault(%p, 0x%lx, 0x%x) -> 0x%x\n",
 			    map, va, ftype, rv);
+#endif
+#ifdef MULTIPROCESSOR
+ fixedup:
 #endif
 		/*
 		 * If this was a stack access we keep track of the maximum

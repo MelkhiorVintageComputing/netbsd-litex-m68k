@@ -34,6 +34,10 @@
 #ifndef _M68K_PROC_H
 #define _M68K_PROC_H
 
+#if defined(_KERNEL_OPT)
+#include "opt_multiprocessor.h"
+#endif
+
 #include <machine/frame.h>
 
 /*
@@ -42,6 +46,9 @@
 struct mdlwp {
 	int	*md_regs;		/* registers on current frame */
 	int	md_flags;		/* machine-dependent flags */
+#if defined(_KERNEL) && defined(MULTIPROCESSOR)
+	void	*md_tlbbatch;		/* open TLB shootdown batch (pmap) */
+#endif
 };
 
 /* md_flags */

@@ -135,6 +135,7 @@ struct cpu_info {
 	void	**ci_vectors;		/* vector table (what VBR points to) */
 	struct cpu_info *ci_next;	/* list of all CPUs */
 	void	*ci_md;			/* port-specific per-CPU data */
+	struct pmap *ci_pmap;		/* user pmap loaded (pmap_activate) */
 #endif
 };
 #endif /* _KERNEL || _KMEMUSER */

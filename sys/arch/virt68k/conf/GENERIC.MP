@@ -5,3 +5,5 @@
 include "arch/virt68k/conf/GENERIC"
 
 options 	MULTIPROCESSOR
+
+pseudo-device	lockstat		# lock profiling (virtsmp counter)

@@ -87,9 +87,11 @@
 #if defined(_KERNEL) && defined(MULTIPROCESSOR)
 /* TLB shootdown (pmap_motorola.c); the port provides m68k_send_tlb_ipi() */
 #define	PMAP_TLB_ALL	((vaddr_t)-1)
-void	pmap_tlb_shootdown(vaddr_t);
 void	pmap_tlb_shootdown_ipi(void);
 void	m68k_send_tlb_ipi(struct cpu_info *);
+void	pmap_mp_attach_evcnt(void);
+struct pmap;
+bool	pmap_fault_fixup(struct pmap *, vaddr_t, int);
 #endif
 
 /*
@@ -104,6 +106,9 @@ struct pmap {
 	u_int			pm_count;	/* pmap reference count */
 	struct pmap_statistics	pm_stats;	/* pmap statistics */
 	int			pm_ptpages;	/* more stats: PT pages */
+#ifdef MULTIPROCESSOR
+	volatile uint32_t	pm_cpus;	/* CPUs where it is loaded */
+#endif
 };
 
 /*
