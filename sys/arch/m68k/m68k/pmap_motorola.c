@@ -384,6 +384,7 @@ struct pmap_tlb_batch {
 	uint32_t	tb_targets;	/* CPUs to send it to */
 	u_int		tb_nva;		/* PMAP_TLB_MAXVA + 1: everything */
 	vaddr_t		tb_va[PMAP_TLB_MAXVA];
+	struct pglist	tb_freeptp;	/* PT pages to free after it */
 };
 
 static inline void
@@ -394,6 +395,7 @@ pmap_tlb_batch_begin(struct pmap_tlb_batch *b, bool on)
 	b->tb_prev = l->l_md.md_tlbbatch;
 	b->tb_targets = 0;
 	b->tb_nva = 0;
+	TAILQ_INIT(&b->tb_freeptp);
 	l->l_md.md_tlbbatch = on ? b : NULL;
 }
 
@@ -402,8 +404,37 @@ static void	pmap_tlb_batch_flush(struct pmap_tlb_batch *);
 static inline void
 pmap_tlb_batch_end(struct pmap_tlb_batch *b)
 {
+	struct vm_page *pg;
+
 	pmap_tlb_batch_flush(b);
 	curlwp->l_md.md_tlbbatch = b->tb_prev;
+	if (!TAILQ_EMPTY(&b->tb_freeptp)) {
+		rw_enter(uvm_kernel_object->vmobjlock, RW_WRITER);
+		while ((pg = TAILQ_FIRST(&b->tb_freeptp)) != NULL) {
+			TAILQ_REMOVE(&b->tb_freeptp, pg, pageq.queue);
+			uvm_pagefree(pg);
+		}
+		rw_exit(uvm_kernel_object->vmobjlock);
+	}
+}
+
+/*
+ * Free a user PT page, whose kernel mapping was just removed: once the
+ * shootdown of that mapping is done, so at the end of the batch if one
+ * is open (the shootdown is immediate otherwise).
+ */
+static void
+pmap_free_ptpage(struct vm_page *pg)
+{
+	struct pmap_tlb_batch *b = curlwp->l_md.md_tlbbatch;
+
+	if (b != NULL) {
+		TAILQ_INSERT_TAIL(&b->tb_freeptp, pg, pageq.queue);
+		return;
+	}
+	rw_enter(uvm_kernel_object->vmobjlock, RW_WRITER);
+	uvm_pagefree(pg);
+	rw_exit(uvm_kernel_object->vmobjlock);
 }
 
 /* flush the open batch (if any): before a page table page is freed */
@@ -2820,11 +2851,12 @@ pmap_remove_mapping(pmap_t pmap, vaddr_t va, pt_entry_t *pte, int flags,
 			pmap_remove_mapping(pmap_kernel(), ptpva,
 			    NULL, PRM_TFLUSH|PRM_CFLUSH, NULL);
 #ifdef MULTIPROCESSOR
-			PMAP_TLB_BATCH_SYNC();
-#endif
+			pmap_free_ptpage(PHYS_TO_VM_PAGE(ptppa));
+#else
 			rw_enter(uvm_kernel_object->vmobjlock, RW_WRITER);
 			uvm_pagefree(PHYS_TO_VM_PAGE(ptppa));
 			rw_exit(uvm_kernel_object->vmobjlock);
+#endif
 			PMAP_DPRINTF(PDB_REMOVE|PDB_PTPAGE,
 			    ("remove: PT page 0x%lx (0x%lx) freed\n",
 			    ptpva, ptppa));
@@ -3352,8 +3384,22 @@ pmap_enter_ptpage(pmap_t pmap, vaddr_t va, bool can_fail)
 			    pmap == pmap_kernel() ? "Kernel" : "User",
 			    va, ptpa, pte, *pte);
 #endif
+#ifdef MULTIPROCESSOR
+		/*
+		 * The mapping was just entered (its PTE was invalid), so no
+		 * other CPU has it in its ATC: change it here, without the
+		 * shootdown of pmap_changebit().
+		 */
+		pt_entry_t *kpte = pmap_pte(pmap_kernel(), va);
+
+		DCFP(ptpa);
+		ICPP(ptpa);
+		*kpte = (*kpte & ~PG_CCB) | PG_CI;
+		pmap_tbis_local(va);
+#else
 		if (pmap_changebit(ptpa, PG_CI, (pt_entry_t)~PG_CCB))
 			DCIS();
+#endif
 	}
 #endif
 	/*
