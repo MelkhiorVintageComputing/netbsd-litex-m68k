@@ -385,6 +385,9 @@ struct pmap_tlb_batch {
 	u_int		tb_nva;		/* PMAP_TLB_MAXVA + 1: everything */
 	vaddr_t		tb_va[PMAP_TLB_MAXVA];
 	struct pglist	tb_freeptp;	/* PT pages to free after it */
+	vaddr_t		tb_freestab;	/* segment tables to free after it */
+	struct pv_entry	*tb_prepv;	/* allocated for pmap_enter() */
+	struct pv_entry	*tb_freepv;	/* pv entries to free after it */
 };
 
 static inline void
@@ -396,6 +399,9 @@ pmap_tlb_batch_begin(struct pmap_tlb_batch *b, bool on)
 	b->tb_targets = 0;
 	b->tb_nva = 0;
 	TAILQ_INIT(&b->tb_freeptp);
+	b->tb_freestab = 0;
+	b->tb_prepv = NULL;
+	b->tb_freepv = NULL;
 	l->l_md.md_tlbbatch = on ? b : NULL;
 }
 
@@ -404,17 +410,37 @@ static void	pmap_tlb_batch_flush(struct pmap_tlb_batch *);
 static inline void
 pmap_tlb_batch_end(struct pmap_tlb_batch *b)
 {
-	struct vm_page *pg;
-
 	pmap_tlb_batch_flush(b);
 	curlwp->l_md.md_tlbbatch = b->tb_prev;
-	if (!TAILQ_EMPTY(&b->tb_freeptp)) {
-		rw_enter(uvm_kernel_object->vmobjlock, RW_WRITER);
-		while ((pg = TAILQ_FIRST(&b->tb_freeptp)) != NULL) {
-			TAILQ_REMOVE(&b->tb_freeptp, pg, pageq.queue);
-			uvm_pagefree(pg);
-		}
-		rw_exit(uvm_kernel_object->vmobjlock);
+}
+
+/*
+ * After pmap_tlb_batch_end() (so once no CPU can use them), with no
+ * spin lock held: free the PT pages, segment tables and pv entries that
+ * were released.
+ */
+extern struct vm_map *st_map;
+extern struct pool_cache pmap_pv_cache;
+
+static void
+pmap_tlb_batch_free(struct pmap_tlb_batch *b)
+{
+	struct vm_page *pg;
+	struct pv_entry *pv;
+	vaddr_t stab;
+
+	/* (the user PT pages have no object, see pmap_enter_ptpage()) */
+	while ((pg = TAILQ_FIRST(&b->tb_freeptp)) != NULL) {
+		TAILQ_REMOVE(&b->tb_freeptp, pg, pageq.queue);
+		uvm_pagefree(pg);
+	}
+	while ((stab = b->tb_freestab) != 0) {
+		b->tb_freestab = *(vaddr_t *)stab;
+		uvm_km_free(st_map, stab, M68K_STSIZE, UVM_KMF_WIRED);
+	}
+	while ((pv = b->tb_freepv) != NULL) {
+		b->tb_freepv = pv->pv_next;
+		pool_cache_put(&pmap_pv_cache, pv);
 	}
 }
 
@@ -428,18 +454,24 @@ pmap_free_ptpage(struct vm_page *pg)
 {
 	struct pmap_tlb_batch *b = curlwp->l_md.md_tlbbatch;
 
-	if (b != NULL) {
-		TAILQ_INSERT_TAIL(&b->tb_freeptp, pg, pageq.queue);
-		return;
-	}
-	rw_enter(uvm_kernel_object->vmobjlock, RW_WRITER);
-	uvm_pagefree(pg);
-	rw_exit(uvm_kernel_object->vmobjlock);
+	KASSERT(b != NULL);
+	TAILQ_INSERT_TAIL(&b->tb_freeptp, pg, pageq.queue);
 }
 
-/* flush the open batch (if any): before a page table page is freed */
-#define	PMAP_TLB_BATCH_SYNC()	\
-	pmap_tlb_batch_flush(curlwp->l_md.md_tlbbatch)
+/*
+ * Same for a segment table, which no CPU uses any more (its URP has been
+ * reloaded): its first word links the list.
+ */
+static void
+pmap_free_stab(vaddr_t stab)
+{
+	struct pmap_tlb_batch *b = curlwp->l_md.md_tlbbatch;
+
+	KASSERT(b != NULL);
+	*(vaddr_t *)stab = b->tb_freestab;
+	b->tb_freestab = stab;
+}
+
 
 static inline uint32_t
 pmap_cpubit(struct cpu_info *ci)
@@ -608,6 +640,7 @@ pmap_fault_fixup(pmap_t pm, vaddr_t va, int ftype)
 #define	pmap_is_referenced	pmap_is_referenced_unlocked
 #define	pmap_is_modified	pmap_is_modified_unlocked
 #define	pmap_destroy		pmap_destroy_unlocked
+#define	pmap_extract		pmap_extract_unlocked
 
 static void	pmap_remove(pmap_t, vaddr_t, vaddr_t);
 static void	pmap_page_protect(struct vm_page *, vm_prot_t);
@@ -621,6 +654,7 @@ static bool	pmap_clear_reference(struct vm_page *);
 static bool	pmap_is_referenced(struct vm_page *);
 static bool	pmap_is_modified(struct vm_page *);
 static void	pmap_destroy(pmap_t);
+static bool	pmap_extract(pmap_t, vaddr_t, paddr_t *);
 
 /* Recursive spin lock for the kernel PTEs and PT page lists. */
 static __cpu_simple_lock_t pmap_klock_lock = __SIMPLELOCK_UNLOCKED;
@@ -652,6 +686,113 @@ pmap_kunlock(int s)
 		__cpu_simple_unlock(&pmap_klock_lock);
 	}
 	splx(s);
+}
+
+/*
+ * Locking.  In this order:
+ *
+ * pm_lock		the PTEs, segment table and counts of a user pmap.
+ * pmap_klock		the same for the kernel pmap, and the kernel PT
+ *			pages.  The operations on the kernel pmap, which
+ *			may be called by interrupt handlers, take only this
+ *			lock; those on a user pmap take it around their
+ *			changes of kernel mappings (those of the user PT
+ *			pages).
+ * pmap_pv_slock	the pv lists and attributes (a spin lock).
+ *
+ * The operations that go from a page to its mappings, through its pv
+ * list (pmap_page_protect(), pmap_clear_*(), pmap_is_*()), hold the pv
+ * lock and can only try to lock the pmap of each mapping: if that fails,
+ * they release the pv lock, back off, and start again.
+ *
+ * Nothing sleeps with these locks held: pmap_enter() allocates without
+ * waiting, and waits and retries with no lock held; the PT pages,
+ * segment tables and pv entries that become free are freed at the end
+ * of the operation (see pmap_tlb_batch_free()), with no spin lock held.
+ */
+static __cpu_simple_lock_t pmap_pv_slock = __SIMPLELOCK_UNLOCKED;
+
+static inline int
+pmap_pv_lock(void)
+{
+	int s = splvm();
+
+	__cpu_simple_lock(&pmap_pv_slock);
+	return s;
+}
+
+static inline void
+pmap_pv_unlock(int s)
+{
+	__cpu_simple_unlock(&pmap_pv_slock);
+	splx(s);
+}
+#define	PMAP_PV_LOCK(s)		((s) = pmap_pv_lock())
+#define	PMAP_PV_UNLOCK(s)	pmap_pv_unlock(s)
+
+static bool
+pmap_ktrylock(int *sp)
+{
+	int s = splvm();
+	struct cpu_info *ci = curcpu();
+
+	if (pmap_klock_owner == ci) {
+		pmap_klock_depth++;
+	} else if (__cpu_simple_lock_try(&pmap_klock_lock)) {
+		pmap_klock_owner = ci;
+		pmap_klock_depth = 1;
+	} else {
+		splx(s);
+		return false;
+	}
+	*sp = s;
+	return true;
+}
+
+/* With the pv lock held: try to lock the pmap of a mapping. */
+static inline bool
+pmap_pv_trylock_pmap(pmap_t pm, int *sp)
+{
+	if (pm == pmap_kernel())
+		return pmap_ktrylock(sp);
+	return mutex_tryenter(&pm->pm_lock);
+}
+
+static inline void
+pmap_pv_unlock_pmap(pmap_t pm, int s)
+{
+	if (pm == pmap_kernel())
+		pmap_kunlock(s);
+	else
+		mutex_exit(&pm->pm_lock);
+}
+
+/* A pmap could not be locked: let its owner go on (it may want the pv lock) */
+static void
+pmap_pv_backoff(u_int *count)
+{
+	u_int i;
+
+	if (*count < 1024)
+		*count *= 2;
+	for (i = 0; i < *count; i++)
+		__insn_barrier();
+}
+
+/*
+ * The PTE bits are changed with compare-and-swap: the MMUs of the other
+ * CPUs set the U and M bits at any time.
+ */
+static inline pt_entry_t
+pmap_pte_update(pt_entry_t *pte, pt_entry_t set, pt_entry_t mask)
+{
+	pt_entry_t o, n;
+
+	do {
+		o = *pte;
+		n = (o | set) & mask;
+	} while (o != n && atomic_cas_32(pte, o, n) != o);
+	return o;
 }
 
 /*
@@ -791,6 +932,8 @@ pmap_tlb_shootdown_ipi(void)
 }
 #else
 #define	TBIS_LOCAL(va)	TBIS(va)
+#define	PMAP_PV_LOCK(s)		((s) = splvm())
+#define	PMAP_PV_UNLOCK(s)	splx(s)
 #endif /* MULTIPROCESSOR */
 
 static struct pmap kernel_pmap_store;
@@ -858,8 +1001,30 @@ pt_entry_t	*caddr2_pte;	/* PTE for CADDR2 */
 struct pool	pmap_pmap_pool;	/* memory pool for pmap structures */
 struct pool	pmap_pv_pool;	/* memory pool for pv entries */
 
+#ifdef MULTIPROCESSOR
+/* a pool cache: per-CPU caches of pv entries */
+struct pool_cache pmap_pv_cache;
+#define pmap_alloc_pv()		pool_cache_get(&pmap_pv_cache, PR_NOWAIT)
+/*
+ * The pool lock is held while the pool grows, which needs pmap_klock:
+ * the pv entries are allocated before the pmap is locked (pmap_enter()),
+ * and freed at the end of the operation (pmap_tlb_batch_free()).
+ */
+static void
+pmap_free_pv(struct pv_entry *pv)
+{
+	struct pmap_tlb_batch *b = curlwp->l_md.md_tlbbatch;
+
+	if (b != NULL) {
+		pv->pv_next = b->tb_freepv;
+		b->tb_freepv = pv;
+	} else
+		pool_cache_put(&pmap_pv_cache, pv);
+}
+#else
 #define pmap_alloc_pv()		pool_get(&pmap_pv_pool, PR_NOWAIT)
 #define pmap_free_pv(pv)	pool_put(&pmap_pv_pool, (pv))
+#endif
 
 #define	PAGE_IS_MANAGED(pa)	(pmap_initialized && uvm_pageismanaged(pa))
 
@@ -1150,8 +1315,14 @@ pmap_init(void)
 	/*
 	 * Initialize the pv_entry pools.
 	 */
+#ifdef MULTIPROCESSOR
+	/* (allocated and freed with no pmap lock held, see pmap_free_pv()) */
+	pool_cache_bootstrap(&pmap_pv_cache, sizeof(struct pv_entry), 0, 0, 0,
+	    "pvpl", &pool_allocator_meta, IPL_VM, NULL, NULL, NULL);
+#else
 	pool_init(&pmap_pv_pool, sizeof(struct pv_entry), 0, 0, 0, "pvpl",
 	    &pool_allocator_meta, IPL_NONE);
+#endif
 
 	/*
 	 * Now that this is done, mark the pages shared with the
@@ -1279,6 +1450,9 @@ pmap_create(void)
 	pmap = pool_get(&pmap_pmap_pool, PR_WAITOK);
 	memset(pmap, 0, sizeof(*pmap));
 	pmap_pinit(pmap);
+#ifdef MULTIPROCESSOR
+	mutex_init(&pmap->pm_lock, MUTEX_DEFAULT, IPL_NONE);
+#endif
 	return pmap;
 }
 
@@ -1332,6 +1506,9 @@ pmap_destroy(pmap_t pmap)
 		pmap_drop(pmap);
 #endif
 		pmap_release(pmap);
+#ifdef MULTIPROCESSOR
+		mutex_destroy(&pmap->pm_lock);
+#endif
 		pool_put(&pmap_pmap_pool, pmap);
 	}
 }
@@ -1603,6 +1780,32 @@ pmap_page_protect(struct vm_page *pg, vm_prot_t prot)
 
 	pvh = pa_to_pvh(pa);
 	pv = &pvh->pvh_first;
+#ifdef MULTIPROCESSOR
+	u_int backoff = 1;
+
+	for (;;) {
+		pmap_t pm;
+		vaddr_t va;
+		int ps;
+
+		PMAP_PV_LOCK(s);
+		if ((pm = pv->pv_pmap) == NULL) {
+			PMAP_PV_UNLOCK(s);
+			break;
+		}
+		va = pv->pv_va;
+		if (!pmap_pv_trylock_pmap(pm, &ps)) {
+			PMAP_PV_UNLOCK(s);
+			pmap_pv_backoff(&backoff);
+			continue;
+		}
+		/* with pm locked, the mapping stays */
+		PMAP_PV_UNLOCK(s);
+		pte = pmap_pte(pm, va);
+		pmap_remove_mapping(pm, va, pte, PRM_TFLUSH|PRM_CFLUSH, NULL);
+		pmap_pv_unlock_pmap(pm, ps);
+	}
+#else
 	s = splvm();
 	while (pv->pv_pmap != NULL) {
 
@@ -1616,6 +1819,7 @@ pmap_page_protect(struct vm_page *pg, vm_prot_t prot)
 		    pte, PRM_TFLUSH|PRM_CFLUSH, NULL);
 	}
 	splx(s);
+#endif
 }
 
 /*
@@ -1703,7 +1907,12 @@ pmap_protect(pmap_t pmap, vaddr_t sva, vaddr_t eva, vm_prot_t prot)
 					ICPP(pa);
 				}
 #endif
+#ifdef MULTIPROCESSOR
+				(void)pmap_pte_update(pte, isro ? PG_PROT : 0,
+				    isro ? ~0 : ~PG_PROT);
+#else
 				pmap_pte_set_prot(pte, isro);
+#endif
 #ifdef MULTIPROCESSOR
 				__USE(needtflush);
 				if (isro)
@@ -1846,7 +2055,7 @@ pmap_enter(pmap_t pmap, vaddr_t va, paddr_t pa, vm_prot_t prot, u_int flags)
 
 		pvh = pa_to_pvh(pa);
 		pv = &pvh->pvh_first;
-		s = splvm();
+		PMAP_PV_LOCK(s);
 
 		PMAP_DPRINTF(PDB_ENTER,
 		    ("enter: pv at %p: %lx/%p/%p\n",
@@ -1876,7 +2085,20 @@ pmap_enter(pmap_t pmap, vaddr_t va, paddr_t pa, vm_prot_t prot, u_int flags)
 				npv = opv;
 				opv = NULL;
 			} else {
+#ifdef MULTIPROCESSOR
+				/*
+				 * Allocated by the caller before locking: a
+				 * pool that grows may need pmap_klock.
+				 */
+				struct pmap_tlb_batch *b =
+				    curlwp->l_md.md_tlbbatch;
+
+				KASSERT(b != NULL);
+				npv = b->tb_prepv;
+				b->tb_prepv = NULL;
+#else
 				npv = pmap_alloc_pv();
+#endif
 			}
 			KASSERT(npv != NULL);
 			npv->pv_va = va;
@@ -1946,7 +2168,7 @@ pmap_enter(pmap_t pmap, vaddr_t va, paddr_t pa, vm_prot_t prot, u_int flags)
 		else if (flags & VM_PROT_ALL)
 			pvh->pvh_attrs |= PG_U;
 
-		splx(s);
+		PMAP_PV_UNLOCK(s);
 	}
 	/*
 	 * Assumption: if it is not part of our managed memory
@@ -2021,9 +2243,13 @@ validate:
 #endif
 #ifdef MULTIPROCESSOR
 	{
-		pt_entry_t opte = *pte;
+		pt_entry_t opte;
 
-		*pte = npte;
+		/* keep the U and M bits set meanwhile by another CPU */
+		do {
+			opte = *pte;
+			npte = (npte & ~(PG_M|PG_U)) | (opte & (PG_M|PG_U));
+		} while (atomic_cas_32(pte, opte, npte) != opte);
 		/*
 		 * A valid mapping that loses rights or changes its cache
 		 * mode must be shot down.  (One whose PA changes has been
@@ -2262,6 +2488,9 @@ pmap_unwire(pmap_t pmap, vaddr_t va)
  *	Extract the physical address associated with the given
  *	pmap/virtual address pair.
  */
+#ifdef MULTIPROCESSOR
+static
+#endif
 bool
 pmap_extract(pmap_t pmap, vaddr_t va, paddr_t *pap)
 {
@@ -2797,8 +3026,12 @@ pmap_remove_mapping(pmap_t pmap, vaddr_t va, pt_entry_t *pte, int flags,
 	 */
 
 	PMAP_DPRINTF(PDB_REMOVE, ("remove: invalidating pte at %p\n", pte));
+#ifdef MULTIPROCESSOR
+	bits = atomic_swap_32(pte, PG_NV) & (PG_U|PG_M);
+#else
 	bits = *pte & (PG_U|PG_M);
 	*pte = PG_NV;
+#endif
 #ifdef MULTIPROCESSOR
 	if (flags & PRM_TFLUSH)
 		pmap_inval(pmap, va);
@@ -2848,11 +3081,16 @@ pmap_remove_mapping(pmap_t pmap, vaddr_t va, pt_entry_t *pte, int flags,
 				    ptppv->pv_pmap, ptppv->pv_va,
 				    ptppv->pv_next);
 #endif
+#ifdef MULTIPROCESSOR
+			int ks = pmap_klock();
+
 			pmap_remove_mapping(pmap_kernel(), ptpva,
 			    NULL, PRM_TFLUSH|PRM_CFLUSH, NULL);
-#ifdef MULTIPROCESSOR
+			pmap_kunlock(ks);
 			pmap_free_ptpage(PHYS_TO_VM_PAGE(ptppa));
 #else
+			pmap_remove_mapping(pmap_kernel(), ptpva,
+			    NULL, PRM_TFLUSH|PRM_CFLUSH, NULL);
 			rw_enter(uvm_kernel_object->vmobjlock, RW_WRITER);
 			uvm_pagefree(PHYS_TO_VM_PAGE(ptppa));
 			rw_exit(uvm_kernel_object->vmobjlock);
@@ -2878,7 +3116,7 @@ pmap_remove_mapping(pmap_t pmap, vaddr_t va, pt_entry_t *pte, int flags,
 	pvh = pa_to_pvh(pa);
 	pv = &pvh->pvh_first;
 	ste = NULL;
-	s = splvm();
+	PMAP_PV_LOCK(s);
 
 	/*
 	 * If it is the first entry on the list, it is actually
@@ -2985,10 +3223,12 @@ pmap_remove_mapping(pmap_t pmap, vaddr_t va, pt_entry_t *pte, int flags,
 				    ("remove: free stab %p\n",
 				    ptpmap->pm_stab));
 #ifdef MULTIPROCESSOR
-				PMAP_TLB_BATCH_SYNC();
-#endif
+				/* freed once no CPU uses it, see below */
+				vaddr_t ostab = (vaddr_t)ptpmap->pm_stab;
+#else
 				uvm_km_free(st_map, (vaddr_t)ptpmap->pm_stab,
 				    M68K_STSIZE, UVM_KMF_WIRED);
+#endif
 				ptpmap->pm_stab = Segtabzero;
 				ptpmap->pm_stpa = Segtabzeropa;
 #if defined(M68040) || defined(M68060)
@@ -3003,6 +3243,7 @@ pmap_remove_mapping(pmap_t pmap, vaddr_t va, pt_entry_t *pte, int flags,
 				 */
 #ifdef MULTIPROCESSOR
 				pmap_reload_urp(ptpmap);
+				pmap_free_stab(ostab);
 #else
 				if (active_user_pmap(ptpmap)) {
 					pmap_load_urp((paddr_t)ptpmap->pm_stpa);
@@ -3019,7 +3260,7 @@ pmap_remove_mapping(pmap_t pmap, vaddr_t va, pt_entry_t *pte, int flags,
 	 */
 
 	pvh->pvh_attrs |= bits;
-	splx(s);
+	PMAP_PV_UNLOCK(s);
 
 	if (opvp != NULL)
 		*opvp = opv;
@@ -3033,6 +3274,87 @@ pmap_remove_mapping(pmap_t pmap, vaddr_t va, pt_entry_t *pte, int flags,
  *	Test the modified/referenced bits of a physical page.
  */
 /* static */
+#ifdef MULTIPROCESSOR
+bool
+pmap_testbit(paddr_t pa, int bit)
+{
+	struct pv_header *pvh = pa_to_pvh(pa);
+	struct pv_entry *pv;
+	u_int backoff = 1;
+	bool rv;
+	int s, ps;
+
+ again:
+	PMAP_PV_LOCK(s);
+	rv = (pvh->pvh_attrs & bit) != 0;
+	for (pv = &pvh->pvh_first; !rv && pv != NULL && pv->pv_pmap != NULL;
+	    pv = pv->pv_next) {
+		if (!pmap_pv_trylock_pmap(pv->pv_pmap, &ps)) {
+			PMAP_PV_UNLOCK(s);
+			pmap_pv_backoff(&backoff);
+			goto again;
+		}
+		if (*pmap_pte(pv->pv_pmap, pv->pv_va) & bit) {
+			pvh->pvh_attrs |= bit;
+			rv = true;
+		}
+		pmap_pv_unlock_pmap(pv->pv_pmap, ps);
+	}
+	PMAP_PV_UNLOCK(s);
+	return rv;
+}
+
+bool
+pmap_changebit(paddr_t pa, pt_entry_t set, pt_entry_t mask)
+{
+	struct pv_header *pvh = pa_to_pvh(pa);
+	struct pv_entry *pv;
+	pt_entry_t *pte, opte;
+	u_int backoff = 1;
+	bool r, flushed = false;
+	int s, ps;
+
+	r = false;
+ again:
+	PMAP_PV_LOCK(s);
+	/* Clear saved attributes (modify, reference) */
+	r |= (pvh->pvh_attrs & ~mask) != 0;
+	pvh->pvh_attrs &= mask;
+	for (pv = &pvh->pvh_first; pv != NULL && pv->pv_pmap != NULL;
+	    pv = pv->pv_next) {
+		if (!pmap_pv_trylock_pmap(pv->pv_pmap, &ps)) {
+			/* those already done are left as they are */
+			PMAP_PV_UNLOCK(s);
+			pmap_pv_backoff(&backoff);
+			goto again;
+		}
+		pte = pmap_pte(pv->pv_pmap, pv->pv_va);
+		if (((*pte | set) & mask) != *pte) {
+			r = true;
+			/*
+			 * If we are changing caching status or protection
+			 * make sure the caches are flushed (but only once).
+			 */
+			if (!flushed && ((set == PG_RO) ||
+			     (set & PG_CMASK) || (mask & PG_CMASK) == 0)) {
+				flushed = true;
+				DCFP(pa);
+				ICPP(pa);
+			}
+			opte = pmap_pte_update(pte, set, mask);
+			/* a new right needs no shootdown */
+			if ((opte & ~mask) != 0 ||
+			    ((set & ~opte) & (PG_RO | PG_CMASK | PG_CI)) != 0)
+				pmap_inval(pv->pv_pmap, pv->pv_va);
+			else
+				PMAP_INVAL_LOCAL(pv->pv_pmap, pv->pv_va);
+		}
+		pmap_pv_unlock_pmap(pv->pv_pmap, ps);
+	}
+	PMAP_PV_UNLOCK(s);
+	return r;
+}
+#else /* !MULTIPROCESSOR */
 bool
 pmap_testbit(paddr_t pa, int bit)
 {
@@ -3178,6 +3500,7 @@ pmap_changebit(paddr_t pa, pt_entry_t set, pt_entry_t mask)
 	splx(s);
 	return r;
 }
+#endif /* MULTIPROCESSOR */
 
 /*
  * pmap_enter_ptpage:
@@ -3194,6 +3517,10 @@ pmap_enter_ptpage(pmap_t pmap, vaddr_t va, bool can_fail)
 	struct pv_entry *pv;
 	st_entry_t *ste;
 	int s;
+#ifdef MULTIPROCESSOR
+	int ks = 0;
+	bool klocked = false;
+#endif
 
 	PMAP_DPRINTF(PDB_FOLLOW|PDB_ENTER|PDB_PTPAGE,
 	    ("pmap_enter_ptpage: pmap %p, va %lx\n", pmap, va));
@@ -3347,6 +3674,20 @@ pmap_enter_ptpage(pmap_t pmap, vaddr_t va, bool can_fail)
 		pmap->pm_sref++;
 		PMAP_DPRINTF(PDB_ENTER|PDB_PTPAGE,
 		    ("enter: about to alloc UPT pg at %lx\n", va));
+#ifdef MULTIPROCESSOR
+		/*
+		 * No object, so no object lock, which may be held by a caller
+		 * of the pmap (uvm_fault() of pageable kernel memory): the
+		 * page is found from its kernel mapping (see
+		 * pmap_ptpage_addref()).
+		 */
+		if ((pg = uvm_pagealloc(NULL, 0, NULL,
+		    UVM_PGA_ZERO | UVM_PGA_USERESERVE)) == NULL) {
+			KASSERT(can_fail);
+			pmap->pm_sref--;
+			return ENOMEM;
+		}
+#else
 		rw_enter(uvm_kernel_object->vmobjlock, RW_WRITER);
 		while ((pg = uvm_pagealloc(uvm_kernel_object,
 					   va - vm_map_min(kernel_map),
@@ -3360,9 +3701,15 @@ pmap_enter_ptpage(pmap_t pmap, vaddr_t va, bool can_fail)
 			rw_enter(uvm_kernel_object->vmobjlock, RW_WRITER);
 		}
 		rw_exit(uvm_kernel_object->vmobjlock);
+#endif
 		pg->flags &= ~(PG_BUSY|PG_FAKE);
 		UVM_PAGE_OWN(pg, NULL);
 		ptpa = VM_PAGE_TO_PHYS(pg);
+#ifdef MULTIPROCESSOR
+		/* the rest changes the kernel pmap too */
+		ks = pmap_klock();
+		klocked = true;
+#endif
 		pmap_enter(pmap_kernel(), va, ptpa,
 		    VM_PROT_READ | VM_PROT_WRITE,
 		    VM_PROT_READ | VM_PROT_WRITE | PMAP_WIRED);
@@ -3408,7 +3755,7 @@ pmap_enter_ptpage(pmap_t pmap, vaddr_t va, bool can_fail)
 	 * the STE when we remove the mapping for the page.
 	 */
 	pvh = pa_to_pvh(ptpa);
-	s = splvm();
+	PMAP_PV_LOCK(s);
 	if (pvh) {
 		pv = &pvh->pvh_first;
 		pvh->pvh_attrs |= PVH_PTPAGE;
@@ -3477,7 +3824,11 @@ pmap_enter_ptpage(pmap_t pmap, vaddr_t va, bool can_fail)
 		TBIAU();
 #endif
 	pmap->pm_ptpages++;
-	splx(s);
+	PMAP_PV_UNLOCK(s);
+#ifdef MULTIPROCESSOR
+	if (klocked)
+		pmap_kunlock(ks);
+#endif
 
 	return 0;
 }
@@ -3492,13 +3843,24 @@ pmap_ptpage_addref(vaddr_t ptpva)
 {
 	struct vm_page *pg;
 
+#ifdef MULTIPROCESSOR
+	/*
+	 * No sleeping (see the locking comment): find the page from its
+	 * kernel mapping.  The count belongs to the pmap, under its lock.
+	 */
+	pg = PHYS_TO_VM_PAGE(pmap_pte_pa(pmap_pte(pmap_kernel(), ptpva)));
+	pg->wire_count++;
+#else
 	rw_enter(uvm_kernel_object->vmobjlock, RW_WRITER);
 	pg = uvm_pagelookup(uvm_kernel_object, ptpva - vm_map_min(kernel_map));
 	pg->wire_count++;
+#endif
 	PMAP_DPRINTF(PDB_ENTER|PDB_PTPAGE|PDB_SEGTAB,
 	    ("ptpage addref: pg %p now %d\n",
 	     pg, pg->wire_count));
+#ifndef MULTIPROCESSOR
 	rw_exit(uvm_kernel_object->vmobjlock);
+#endif
 }
 
 /*
@@ -3512,13 +3874,20 @@ pmap_ptpage_delref(vaddr_t ptpva)
 	struct vm_page *pg;
 	int rv;
 
+#ifdef MULTIPROCESSOR
+	pg = PHYS_TO_VM_PAGE(pmap_pte_pa(pmap_pte(pmap_kernel(), ptpva)));
+	rv = --pg->wire_count;
+#else
 	rw_enter(uvm_kernel_object->vmobjlock, RW_WRITER);
 	pg = uvm_pagelookup(uvm_kernel_object, ptpva - vm_map_min(kernel_map));
 	rv = --pg->wire_count;
+#endif
 	PMAP_DPRINTF(PDB_ENTER|PDB_PTPAGE|PDB_SEGTAB,
 	    ("ptpage delref: pg %p now %d\n",
 	     pg, pg->wire_count));
+#ifndef MULTIPROCESSOR
 	rw_exit(uvm_kernel_object->vmobjlock);
+#endif
 	return rv;
 }
 
@@ -3711,64 +4080,139 @@ kvtop(void *addr)
 #undef	pmap_is_referenced
 #undef	pmap_is_modified
 #undef	pmap_destroy
+#undef	pmap_extract
 
-#define	PMAP_KLOCK_BEGIN	KERNEL_LOCK(1, NULL)
-#define	PMAP_KLOCK_END		KERNEL_UNLOCK_ONE(NULL)
+/*
+ * An operation on one pmap: see the locking comment at the top.  The
+ * remote invalidations are batched, and done before the pmap is unlocked.
+ */
+struct pmap_op {
+	pmap_t		po_pm;
+	int		po_s;
+	u_int		po_oop;
+	struct pmap_tlb_batch po_batch;
+};
 
-/* Batched (true) or immediate (false) shootdowns, see pmap_inval(). */
-#define	PMAP_BATCH_BEGIN(on)						\
-	struct pmap_tlb_batch pmap_batch;				\
-	pmap_tlb_batch_begin(&pmap_batch, (on))
-#define	PMAP_BATCH_END()	pmap_tlb_batch_end(&pmap_batch)
+static inline void
+pmap_op_begin(struct pmap_op *po, pmap_t pm, u_int op)
+{
+	po->po_pm = pm;
+	po->po_oop = pmap_mp_op_set(op);
+	if (pm == pmap_kernel()) {
+		po->po_s = pmap_klock();
+	} else {
+		mutex_enter(&pm->pm_lock);
+	}
+	pmap_tlb_batch_begin(&po->po_batch, true);
+}
+
+static inline void
+pmap_op_end(struct pmap_op *po)
+{
+	pmap_t pm = po->po_pm;
+
+	pmap_tlb_batch_end(&po->po_batch);
+	if (pm == pmap_kernel()) {
+		pmap_kunlock(po->po_s);
+		pmap_tlb_batch_free(&po->po_batch);
+	} else {
+		pmap_tlb_batch_free(&po->po_batch);
+		mutex_exit(&pm->pm_lock);
+	}
+	(void)pmap_mp_op_set(po->po_oop);
+}
+
+/* An operation through the pv list of a page (it locks each pmap). */
+static inline void
+pmap_pvop_begin(struct pmap_op *po, u_int op)
+{
+	po->po_pm = NULL;
+	po->po_oop = pmap_mp_op_set(op);
+	pmap_tlb_batch_begin(&po->po_batch, true);
+}
+
+static inline void
+pmap_pvop_end(struct pmap_op *po)
+{
+	pmap_tlb_batch_end(&po->po_batch);
+	pmap_tlb_batch_free(&po->po_batch);
+	(void)pmap_mp_op_set(po->po_oop);
+}
 
 void
 pmap_remove(pmap_t pmap, vaddr_t sva, vaddr_t eva)
 {
-	PMAP_MP_OP_BEGIN(PMOP_REMOVE);
-	PMAP_BATCH_BEGIN(true);
-	PMAP_KLOCK_BEGIN;
-	pmap_remove_unlocked(pmap, sva, eva);
-	PMAP_BATCH_END();
-	PMAP_KLOCK_END;
-	PMAP_MP_OP_END();
-}
+	struct pmap_op po;
 
-void
-pmap_page_protect(struct vm_page *pg, vm_prot_t prot)
-{
-	PMAP_MP_OP_BEGIN(PMOP_PAGEPROT);
-	PMAP_BATCH_BEGIN(true);
-	PMAP_KLOCK_BEGIN;
-	pmap_page_protect_unlocked(pg, prot);
-	PMAP_BATCH_END();
-	PMAP_KLOCK_END;
-	PMAP_MP_OP_END();
+	pmap_op_begin(&po, pmap, PMOP_REMOVE);
+	pmap_remove_unlocked(pmap, sva, eva);
+	pmap_op_end(&po);
 }
 
 void
 pmap_protect(pmap_t pmap, vaddr_t sva, vaddr_t eva, vm_prot_t prot)
 {
-	PMAP_MP_OP_BEGIN(PMOP_PROTECT);
-	PMAP_BATCH_BEGIN(true);
-	PMAP_KLOCK_BEGIN;
+	struct pmap_op po;
+
+	pmap_op_begin(&po, pmap, PMOP_PROTECT);
 	pmap_protect_unlocked(pmap, sva, eva, prot);
-	PMAP_BATCH_END();
-	PMAP_KLOCK_END;
-	PMAP_MP_OP_END();
+	pmap_op_end(&po);
 }
 
 int
 pmap_enter(pmap_t pmap, vaddr_t va, paddr_t pa, vm_prot_t prot, u_int flags)
 {
+	struct pmap_op po;
+	vaddr_t ptab = 0;
 	int error;
 
-	PMAP_MP_OP_BEGIN(PMOP_ENTER);
-	PMAP_BATCH_BEGIN(false);
-	PMAP_KLOCK_BEGIN;
-	error = pmap_enter_unlocked(pmap, va, pa, prot, flags);
-	PMAP_BATCH_END();
-	PMAP_KLOCK_END;
-	PMAP_MP_OP_END();
+	/* (a pool that grows needs pmap_klock: allocate before locking) */
+	struct pv_entry *pv = pmap_alloc_pv();
+
+	if (pmap == pmap_kernel()) {
+		pmap_op_begin(&po, pmap, PMOP_ENTER);
+		po.po_batch.tb_prepv = pv;
+		error = pmap_enter_unlocked(pmap, va, pa, prot, flags);
+		pv = po.po_batch.tb_prepv;
+		pmap_op_end(&po);
+		if (pv != NULL)
+			pmap_free_pv(pv);
+		return error;
+	}
+
+	/*
+	 * The VA of the page table of a user pmap, which may have to wait,
+	 * is allocated before locking; the rest, with the pmap locked, may
+	 * not wait: if memory is short, wait here and try again.
+	 */
+	if (pmap->pm_ptab == NULL) {
+		ptab = uvm_km_alloc(pt_map, M68K_MAX_PTSIZE, 0,
+		    UVM_KMF_VAONLY |
+		    ((flags & PMAP_CANFAIL) ? UVM_KMF_NOWAIT : UVM_KMF_WAITVA));
+		if (ptab == 0)
+			return ENOMEM;
+	}
+	for (;;) {
+		if (pv == NULL)
+			pv = pmap_alloc_pv();
+		pmap_op_begin(&po, pmap, PMOP_ENTER);
+		if (pmap->pm_ptab == NULL) {
+			pmap->pm_ptab = (pt_entry_t *)ptab;
+			ptab = 0;
+		}
+		po.po_batch.tb_prepv = pv;
+		error = pmap_enter_unlocked(pmap, va, pa, prot,
+		    flags | PMAP_CANFAIL);
+		pv = po.po_batch.tb_prepv;
+		pmap_op_end(&po);
+		if (error != ENOMEM || (flags & PMAP_CANFAIL) != 0)
+			break;
+		uvm_wait("pmapent");
+	}
+	if (ptab != 0)
+		uvm_km_free(pt_map, ptab, M68K_MAX_PTSIZE, UVM_KMF_VAONLY);
+	if (pv != NULL)
+		pmap_free_pv(pv);
 	return error;
 }
 
@@ -3784,89 +4228,102 @@ pmap_kenter_pa(vaddr_t va, paddr_t pa, vm_prot_t prot, u_int flags)
 void
 pmap_kremove(vaddr_t va, vsize_t size)
 {
-	PMAP_MP_OP_BEGIN(PMOP_KREMOVE);
-	PMAP_BATCH_BEGIN(true);
-	int s = pmap_klock();
+	struct pmap_op po;
 
+	pmap_op_begin(&po, pmap_kernel(), PMOP_KREMOVE);
 	pmap_kremove_unlocked(va, size);
-	PMAP_BATCH_END();
-	pmap_kunlock(s);
-	PMAP_MP_OP_END();
+	pmap_op_end(&po);
 }
 
 void
 pmap_unwire(pmap_t pmap, vaddr_t va)
 {
-	PMAP_MP_OP_BEGIN(PMOP_OTHER);
-	PMAP_BATCH_BEGIN(false);
-	PMAP_KLOCK_BEGIN;
+	struct pmap_op po;
+
+	pmap_op_begin(&po, pmap, PMOP_OTHER);
 	pmap_unwire_unlocked(pmap, va);
-	PMAP_BATCH_END();
-	PMAP_KLOCK_END;
-	PMAP_MP_OP_END();
+	pmap_op_end(&po);
+}
+
+bool
+pmap_extract(pmap_t pmap, vaddr_t va, paddr_t *pap)
+{
+	bool rv;
+
+	/* the kernel PT pages are never freed */
+	if (pmap == pmap_kernel())
+		return pmap_extract_unlocked(pmap, va, pap);
+	mutex_enter(&pmap->pm_lock);
+	rv = pmap_extract_unlocked(pmap, va, pap);
+	mutex_exit(&pmap->pm_lock);
+	return rv;
+}
+
+void
+pmap_page_protect(struct vm_page *pg, vm_prot_t prot)
+{
+	struct pmap_op po;
+
+	pmap_pvop_begin(&po, PMOP_PAGEPROT);
+	pmap_page_protect_unlocked(pg, prot);
+	pmap_pvop_end(&po);
 }
 
 bool
 pmap_clear_modify(struct vm_page *pg)
 {
+	struct pmap_op po;
 	bool rv;
 
-	PMAP_MP_OP_BEGIN(PMOP_CLRBIT);
-	PMAP_BATCH_BEGIN(true);
-	PMAP_KLOCK_BEGIN;
+	pmap_pvop_begin(&po, PMOP_CLRBIT);
 	rv = pmap_clear_modify_unlocked(pg);
-	PMAP_BATCH_END();
-	PMAP_KLOCK_END;
-	PMAP_MP_OP_END();
+	pmap_pvop_end(&po);
 	return rv;
 }
 
 bool
 pmap_clear_reference(struct vm_page *pg)
 {
+	struct pmap_op po;
 	bool rv;
 
-	PMAP_MP_OP_BEGIN(PMOP_CLRBIT);
-	PMAP_BATCH_BEGIN(true);
-	PMAP_KLOCK_BEGIN;
+	pmap_pvop_begin(&po, PMOP_CLRBIT);
 	rv = pmap_clear_reference_unlocked(pg);
-	PMAP_BATCH_END();
-	PMAP_KLOCK_END;
-	PMAP_MP_OP_END();
+	pmap_pvop_end(&po);
 	return rv;
 }
 
 bool
 pmap_is_referenced(struct vm_page *pg)
 {
+	struct pmap_op po;
 	bool rv;
 
-	PMAP_KLOCK_BEGIN;
+	pmap_pvop_begin(&po, PMOP_OTHER);
 	rv = pmap_is_referenced_unlocked(pg);
-	PMAP_KLOCK_END;
+	pmap_pvop_end(&po);
 	return rv;
 }
 
 bool
 pmap_is_modified(struct vm_page *pg)
 {
+	struct pmap_op po;
 	bool rv;
 
-	PMAP_KLOCK_BEGIN;
+	pmap_pvop_begin(&po, PMOP_OTHER);
 	rv = pmap_is_modified_unlocked(pg);
-	PMAP_KLOCK_END;
+	pmap_pvop_end(&po);
 	return rv;
 }
 
 void
 pmap_destroy(pmap_t pmap)
 {
-	PMAP_MP_OP_BEGIN(PMOP_OTHER);
-	PMAP_BATCH_BEGIN(false);
-	PMAP_KLOCK_BEGIN;
+	u_int oop = pmap_mp_op_set(PMOP_OTHER);
+
+	/* no lock: nothing else uses the pmap once its count is 0 */
 	pmap_destroy_unlocked(pmap);
-	PMAP_BATCH_END();
-	PMAP_KLOCK_END;
-	PMAP_MP_OP_END();
+	(void)pmap_mp_op_set(oop);
 }
 #endif /* MULTIPROCESSOR */

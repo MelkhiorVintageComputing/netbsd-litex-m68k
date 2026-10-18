@@ -85,6 +85,10 @@
 #include <machine/pte.h>
 
 #if defined(_KERNEL) && defined(MULTIPROCESSOR)
+#include <sys/mutex.h>
+#endif
+
+#if defined(_KERNEL) && defined(MULTIPROCESSOR)
 /* TLB shootdown (pmap_motorola.c); the port provides m68k_send_tlb_ipi() */
 #define	PMAP_TLB_ALL	((vaddr_t)-1)
 void	pmap_tlb_shootdown_ipi(void);
@@ -108,6 +112,7 @@ struct pmap {
 	int			pm_ptpages;	/* more stats: PT pages */
 #ifdef MULTIPROCESSOR
 	volatile uint32_t	pm_cpus;	/* CPUs where it is loaded */
+	kmutex_t		pm_lock;	/* see pmap_motorola.c */
 #endif
 };
 
