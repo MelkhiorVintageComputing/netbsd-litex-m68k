@@ -33,6 +33,7 @@ SUBDIR += arch/hpcsh
 SUBDIR += arch/hppa
 SUBDIR += arch/i386
 SUBDIR += arch/landisk
+SUBDIR += arch/litex68k
 SUBDIR += arch/mac68k
 SUBDIR += arch/macppc
 SUBDIR += arch/mipsco
