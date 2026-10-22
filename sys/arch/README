@@ -30,6 +30,7 @@ ia64	ia64	00000000	Intel Itanium/Itanium2 processor based workstations
 ibmnws	powerpc	00000000	IBM Network Station Thin Clients
 iyonix	arm	20040713	Castle Technology xscale based workstations
 landisk	sh3el	20060901	SH4 processor based NAS appliances by I-O DATA
+litex68k	m68k	20261022	LiteX-68K: RD68031 (MC68030) in a LiteX SoC
 luna68k	m68k	20000105	LUNA product line of OMRON Tateisi Electronics
 mac68k	m68k	19930929	Apple Macintosh
 macppc	powerpc,powerpc64	19980515	Apple Power Macintosh and clones

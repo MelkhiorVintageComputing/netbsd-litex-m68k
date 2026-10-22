@@ -1,0 +1,56 @@
+$NetBSD$
+
+NetBSD/litex68k: LiteX-68K
+==========================
+
+LiteX-68K is a LiteX SoC around RD68031, an MC68030 soft-core with its MMU
+and caches, optionally with RD68884 (an MC68881), on an FPGA board (the
+QMTech Wukong V3).  This port is derived from virt68k and runs the stock
+NetBSD/m68k userland (MACHINE_ARCH=m68k).
+
+Booting
+-------
+
+The LiteX BIOS loads the images and starts litexboot (litex-68k's
+sw/litexboot), which loads the kernel's PT_LOAD segments at the RAM base
+(0x4000.0000) + p_paddr, writes Linux/m68k-style bootinfo records right
+after the kernel, and jumps to it with the MMU and caches off.  litexboot is
+used as is.
+
+The kernel is linked at VA 0x2000, like virt68k, and runs at
+VA = PA - firstpa (the classic m68k pmap layout).  locore computes firstpa
+from where it was loaded, turns the MMU on with a bootstrap map (VA 0-256MB
+onto RAM by a level A table, RAM VA==PA by TT1, the CSRs by TT0) so that C
+code runs before the page tables exist, parses the bootinfo, builds the page
+tables, and switches to them (TT1 off).  The CSRs (0xf000.0000 and up) stay
+mapped VA==PA by TT0, and the kernel's VA space stops below them.
+
+Devices
+-------
+
+From the bootinfo (BI_LITEX_*):
+	intr.c		the CPU's interrupt controller (pending/mask CSRs);
+			every line on IPL 2, autovectored
+	litexctrl	SoC controller: reset
+	litextimer	Timer0: hardclock, delay(), 64-bit uptime timecounter
+	liteuart	UART: console and tty (ttyLX0)
+
+From the device tree litexboot passes (BI_LITEX_DTB):
+	litesdcard	LiteSDCard, an sdmmc(4) host: ld(4)
+	liteeth		LiteEth MAC, MDIO bit-banged: rgephy(4)
+
+FPU: BI_FPUTYPE says whether RD68884 is there; without it, FPU_EMULATE
+emulates the MC68881.
+
+Clean room
+----------
+
+The drivers are written from litex-68k's doc/porting-bsd.md, LiteX's own
+BSD-licensed sources (gateware, BIOS libraries, generated csr.h) and the
+Motorola manuals.  No GPL code (Linux, QEMU) was used.
+
+Testing
+-------
+
+	./build.sh -m litex68k tools kernel=LITEX68K_MIN
+	litex-68k/scripts/board.py boot --kernel netbsd [--initrd ramdisk.fs]

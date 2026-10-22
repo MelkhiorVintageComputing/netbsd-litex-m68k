@@ -1,0 +1,65 @@
+# $NetBSD$
+#
+# LITEX68K_MIN: a small litex68k kernel for bring-up.  It uploads faster
+# over the serial line (about 25 KB/s through the BIOS) than GENERIC,
+# and prints early progress markers (A..D) on the UART from locore.
+
+include 	"arch/litex68k/conf/std.litex68k"
+
+options 	INCLUDE_CONFIG_FILE	# embed config file in kernel binary
+
+makeoptions	COPTS="-O2 -fno-reorder-blocks"	# see share/mk/sys.mk
+
+# litexboot only loads the PT_LOAD segments: keep the symbols for DDB.
+makeoptions     COPY_SYMTAB=1
+
+options		M68030
+options 	FPU_EMULATE		# for an SoC without RD68884
+
+# Polled UART for locore's markers (this bitstream's BI_LITEX_UART).
+options 	LITEX68K_EARLYCONS=0xf0005000
+
+maxusers	8
+
+options 	DDB
+options 	DIAGNOSTIC
+options 	KTRACE
+options 	SYSCTL_INCLUDE_DESCR
+
+file-system 	FFS
+file-system 	KERNFS
+file-system 	PROCFS
+file-system	MSDOSFS
+file-system	PTYFS
+file-system	TMPFS
+options 	FFS_NO_SNAPSHOT
+
+options 	INET
+
+options 	COMPAT_AOUT_M68K
+include 	"conf/compat_netbsd09.config"
+
+config netbsd		root on ? type ?
+
+pseudo-device	loop
+pseudo-device	bpfilter
+pseudo-device	pty
+pseudo-device	ksyms
+pseudo-device	clockctl
+pseudo-device	drvctl
+
+mainbus0	at root
+
+litexctrl*	at mainbus? addr ?
+litextimer*	at mainbus? addr ?
+liteuart*	at mainbus? addr ?
+
+# SD card (from the device tree)
+litesdcard*	at mainbus? addr ?	# LiteSDCard host
+sdmmc*		at sdmmcbus?
+ld*		at sdmmc?
+
+# Ethernet (from the device tree)
+liteeth*	at mainbus? addr ?	# LiteEth MAC
+rgephy*		at mii? phy ?		# Realtek 8211 PHYs
+ukphy*		at mii? phy ?		# generic unknown PHYs

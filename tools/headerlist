@@ -77,6 +77,8 @@
 ./iyonix/include/elf_machdep.h
 ./landisk/include/disklabel.h
 ./landisk/include/elf_machdep.h
+./litex68k/include/disklabel.h
+./litex68k/include/elf_machdep.h
 ./luna68k/include/disklabel.h
 ./luna68k/include/elf_machdep.h
 ./m68k/include/elf_machdep.h

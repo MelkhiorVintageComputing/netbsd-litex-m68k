@@ -1,0 +1,86 @@
+#	$NetBSD: files.litex68k,v 1.4.4.1 2025/11/21 09:53:25 martin Exp $
+
+# config file for litex68k (LiteX-68K: RD68031 in a LiteX SoC)
+
+# maxpartitions must be first item in files.${ARCH}.newconf
+maxpartitions 8
+
+defparam opt_litex68k.h	LITEX68K_EARLYCONS	# PA of a polled UART
+
+# Generic devices
+include "dev/scsipi/files.scsipi"		# SCSI
+include "dev/sdmmc/files.sdmmc"			# SD/MMC
+
+device mainbus { [addr = -1] }: libfdt	# reads the device tree
+attach mainbus at root
+file arch/litex68k/dev/mainbus.c			mainbus
+
+# LiteX SoC cores
+device litexctrl
+attach litexctrl at mainbus
+file arch/litex68k/dev/litexctrl.c		litexctrl
+
+device litextimer
+attach litextimer at mainbus
+file arch/litex68k/dev/litextimer.c		litextimer
+
+device liteuart: tty
+attach liteuart at mainbus
+file arch/litex68k/dev/liteuart.c		liteuart needs-flag
+
+device litesdcard: sdmmcbus
+attach litesdcard at mainbus
+file arch/litex68k/dev/litesdcard.c		litesdcard
+
+device liteeth: ether, ifnet, arp, mii, mii_bitbang
+attach liteeth at mainbus
+file arch/litex68k/dev/if_liteeth.c		liteeth
+
+# Memory disk for installer
+file dev/md_root.c				memory_disk_hooks
+
+file arch/litex68k/litex68k/autoconf.c
+file arch/litex68k/litex68k/bootinfo.c
+file arch/litex68k/litex68k/bus_dma.c
+file arch/litex68k/litex68k/bus_space.c
+file arch/litex68k/litex68k/clock.c
+file arch/litex68k/litex68k/disksubr.c
+file arch/litex68k/litex68k/intr.c
+file arch/litex68k/litex68k/litex_fdt.c
+file arch/litex68k/litex68k/machdep.c
+file arch/litex68k/litex68k/pmap_bootstrap.c	compile-with "${NOPROF_C}"
+file arch/litex68k/litex68k/trap.c
+file arch/m68k/m68k/cacheops.c
+file arch/m68k/m68k/db_memrw.c			ddb | kgdb
+file arch/m68k/m68k/kgdb_machdep.c		kgdb
+file arch/m68k/m68k/m68k_trap.c
+file arch/m68k/m68k/mmu_subr.s
+file arch/m68k/m68k/pmap_motorola.c
+file arch/m68k/m68k/procfs_machdep.c		procfs
+file arch/m68k/m68k/sys_machdep.c
+file arch/m68k/m68k/vectors.c
+file arch/m68k/m68k/vm_machdep.c
+file dev/cons.c
+
+# m68k FPU emulator (FPU_EMULATE), for an SoC without RD68884
+include "arch/m68k/fpe/files.fpe"
+
+# Motorola 68060 support package
+include "arch/m68k/060sp/files.060sp"
+
+# NetBSD m68k a.out Binary Compatibility (COMPAT_AOUT_M68K)
+include "compat/aoutm68k/files.aoutm68k"
+
+# SunOS Binary Compatibility (COMPAT_SUNOS)
+include "compat/sunos/files.sunos"
+file	arch/m68k/m68k/sunos_machdep.c		compat_sunos
+
+# Linux binary compatibility (COMPAT_LINUX)
+include "compat/linux/files.linux"
+include "compat/linux/arch/m68k/files.linux_m68k"
+file arch/m68k/m68k/linux_trap.c		compat_linux
+
+# OSS audio driver compatibility
+include "compat/ossaudio/files.ossaudio"
+
+include	"arch/litex68k/conf/majors.litex68k"
