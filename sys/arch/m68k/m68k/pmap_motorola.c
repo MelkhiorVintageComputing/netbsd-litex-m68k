@@ -2477,7 +2477,12 @@ pmap_unwire(pmap_t pmap, vaddr_t va)
 	 */
 
 	if (pmap_pte_w_chg(pte, 0)) {
+#ifdef MULTIPROCESSOR
+		/* not a plain RMW: another CPU's MMU may set U or M meanwhile */
+		(void)pmap_pte_update(pte, 0, (pt_entry_t)~PG_W);
+#else
 		pmap_pte_set_w(pte, false);
+#endif
 		pmap->pm_stats.wired_count--;
 	}
 }
