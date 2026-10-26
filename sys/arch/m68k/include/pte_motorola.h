@@ -97,7 +97,14 @@ typedef u_int	pt_entry_t;	/* page table entry */
 #define	PG_U		PTE51_U		/* == PTE40_U */
 #define	PG_M		PTE51_M		/* == PTE40_M */
 #define	PG_CI		PTE51_CI
-#define	PG_W		__BIT(8)	/* 851 unused bit XXX040 PTE40_U0 */
+/*
+ * PG_W (wired) is a software bit.  It must be ignored by every MMU: an
+ * unused page-address bit of the 851/030 short format (PG_SHIFT >= 12),
+ * the "user reserved" PTE40_UR bit of the 040/060.  Not U0/U1 (bits 8
+ * and 9): the 040/060 drive them on the UPA0/UPA1 pins (snoop control
+ * on multiprocessor boards, or board-specific uses), see <m68k/mmu_40.h>.
+ */
+#define	PG_W		__BIT(11)	/* 851 unused bit, 040 PTE40_UR */
 #define	PG_FRAME	((~0U) << PG_SHIFT)
 #define	PG_PFNUM(x)	(((uintptr_t)(x) & PG_FRAME) >> PG_SHIFT)
 

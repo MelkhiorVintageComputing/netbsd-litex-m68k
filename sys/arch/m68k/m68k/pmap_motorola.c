@@ -137,6 +137,9 @@ __KERNEL_RCSID(0, "$NetBSD: pmap_motorola.c,v 1.89 2024/01/19 03:35:31 thorpej E
 
 #include <m68k/cacheops.h>
 
+/* the software wired bit is never part of the page frame */
+CTASSERT(PG_W < __BIT(PG_SHIFT));
+
 #if !defined(M68K_MMU_MOTOROLA) && !defined(M68K_MMU_HP)
 #error Hit the road, Jack...
 #endif
@@ -1391,7 +1394,8 @@ validate:
 
 	/*
 	 * Remember if this was a wiring-only change.
-	 * If so, we need not flush the TLB and caches.
+	 * If so, we need not flush the TLB and caches: PG_W is a software
+	 * bit that the MMU ignores and does not keep in the ATC.
 	 */
 
 	wired = ((*pte ^ npte) == PG_W);
@@ -1612,7 +1616,8 @@ pmap_unwire(pmap_t pmap, vaddr_t va)
 	/*
 	 * If wiring actually changed (always?) clear the wire bit and
 	 * update the wire count.  Note that wiring is not a hardware
-	 * characteristic so there is no need to invalidate the TLB.
+	 * characteristic (PG_W is ignored by the MMU and not kept in the
+	 * ATC) so there is no need to invalidate the TLB.
 	 */
 
 	if (pmap_pte_w_chg(pte, 0)) {
