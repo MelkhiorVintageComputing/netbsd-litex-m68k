@@ -37,6 +37,7 @@
  *	from: @(#)machdep.c	8.10 (Berkeley) 4/20/94
  */
 
+#include "opt_fpu_emulate.h"
 #include "opt_m68k_arch.h"
 
 #include <sys/cdefs.h>
@@ -281,6 +282,25 @@ cpu_getmcontext(struct lwp *l, mcontext_t *mcp, u_int *flags)
 			*flags |= _UC_FPU;
 		}
 	}
+#ifdef FPU_EMULATE
+	else {
+		/*
+		 * No FPU: the emulator's registers are in the PCB (there
+		 * is no FSAVE frame).  Without them, a signal handler's FP
+		 * work, its FPCR among it, would be left to the code it
+		 * interrupted.
+		 */
+		struct pcb *pcb = lwp_getpcb(l);
+		struct fpframe *fpf = &pcb->pcb_fpregs;
+
+		(void)memcpy(mcp->__fpregs.__fp_fpregs,
+		    fpf->fpf_regs, sizeof(fpf->fpf_regs));
+		mcp->__fpregs.__fp_pcr = fpf->fpf_fpcr;
+		mcp->__fpregs.__fp_psr = fpf->fpf_fpsr;
+		mcp->__fpregs.__fp_piaddr = fpf->fpf_fpiar;
+		*flags |= _UC_FPU;
+	}
+#endif
 }
 
 int
@@ -424,6 +444,20 @@ cpu_setmcontext(struct lwp *l, const mcontext_t *mcp, u_int flags)
 		if (l == curlwp)
 			m68881_restore(fpf);
 	}
+#ifdef FPU_EMULATE
+	else if ((flags & _UC_FPU) != 0) {
+		/* No FPU: the emulator's registers, as saved above. */
+		const __fpregset_t *fpr = &mcp->__fpregs;
+		struct pcb *pcb = lwp_getpcb(l);
+		struct fpframe *fpf = &pcb->pcb_fpregs;
+
+		(void)memcpy(fpf->fpf_regs, fpr->__fp_fpregs,
+		    sizeof(fpf->fpf_regs));
+		fpf->fpf_fpcr = fpr->__fp_pcr;
+		fpf->fpf_fpsr = fpr->__fp_psr;
+		fpf->fpf_fpiar = fpr->__fp_piaddr;
+	}
+#endif
 
 	if ((flags & _UC_TLSBASE) != 0)
 		lwp_setprivate(l, (void *)(uintptr_t)mcp->_mc_tlsbase);
