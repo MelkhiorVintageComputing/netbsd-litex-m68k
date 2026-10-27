@@ -110,7 +110,11 @@ main(int argc, char **argv)
 			it.it_value = it.it_interval;
 			setitimer(ITIMER_REAL, &it, NULL);
 			for (r = 0; r < rounds; r++) {
-				double v = work(i);
+				/*
+				 * Rounded to a double as expect[] was: work()
+				 * returns its sum in extended precision.
+				 */
+				volatile double v = work(i);
 				if (v != expect[i]) {
 					printf("fptest: proc %d round %d: "
 					    "%.17g != %.17g\n", i, r, v,
