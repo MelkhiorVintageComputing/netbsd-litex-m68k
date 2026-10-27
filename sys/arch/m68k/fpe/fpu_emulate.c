@@ -714,7 +714,9 @@ fpu_emul_arith(struct fpemu *fe, struct instruction *insn)
 		}
 #endif /* DEBUG_FPE */
 
-		fpu_load_ea(frame, insn, &insn->is_ea, (char*)buf);
+		sig = fpu_load_ea(frame, insn, &insn->is_ea, (char*)buf);
+		if (sig)
+			return sig;
 		if (format == FTYPE_WRD) {
 			/* sign-extend */
 			buf[0] &= 0xffff;

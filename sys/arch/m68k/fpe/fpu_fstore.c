@@ -132,7 +132,9 @@ fpu_emul_fstore(struct fpemu *fe, struct instruction *insn)
 #endif
 	fpu_implode(fe, &fe->fe_f3, format, buf);
 
-	fpu_store_ea(frame, insn, &insn->is_ea, (char *)buf);
+	sig = fpu_store_ea(frame, insn, &insn->is_ea, (char *)buf);
+	if (sig)
+		return sig;
 #if DEBUG_FPE
 	printf("  fpu_emul_fstore: %08x,%08x,%08x size %d\n",
 	    buf[0], buf[1], buf[2], insn->is_datasize);

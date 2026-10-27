@@ -165,7 +165,9 @@ fpu_emul_fscale(struct fpemu *fe, struct instruction *insn)
 			printf("%c%d@\n", regname, insn->is_ea.ea_regnum & 7);
 		}
 #endif
-		fpu_load_ea(frame, insn, &insn->is_ea, (char*)buf);
+		sig = fpu_load_ea(frame, insn, &insn->is_ea, (char*)buf);
+		if (sig)
+			return sig;
 
 #if DEBUG_FPE
 		printf("fpu_emul_fscale: src = %08x%08x%08x, siz = %d\n",
