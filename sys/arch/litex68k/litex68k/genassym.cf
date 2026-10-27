@@ -46,6 +46,7 @@ include <machine/fcode.h>
 include <machine/psl.h>
 include <machine/pcb.h>
 include <machine/pte.h>
+include <machine/bootinfo.h>
 
 # MMU options
 define	M68K_MMU_MOTOROLA	1
@@ -90,6 +91,14 @@ export	MMU40_TCR_BITS
 # For mmu_subr.s
 define	MACHINE_TT0		LITEX68K_TT30_IO
 define	LITEX68K_TT30_RAM_BOOT	LITEX68K_TT30_RAM_BOOT
+define	MACHINE_DTT0		LITEX68K_TT40_IO
+define	LITEX68K_TT40_IO	LITEX68K_TT40_IO
+define	LITEX68K_TT40_RAM_BOOT	LITEX68K_TT40_RAM_BOOT
+
+# The bootinfo, read by locore before the MMU is on
+define	BI_LAST			BI_LAST
+define	BI_MMUTYPE		BI_MMUTYPE
+define	BI_MMU_68040		BI_MMU_68040
 
 # lwp & proc fields and values
 define	L_PCB			offsetof(struct lwp, l_addr)

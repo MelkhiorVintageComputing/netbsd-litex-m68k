@@ -190,7 +190,9 @@ mainbus_attach(device_t parent __unused, device_t self, void *args __unused)
 
 	printf("\n");
 
-	_mainbus_dma_tag._dmamap_sync = _bus_dmamap_sync_030;
+	_mainbus_dma_tag._dmamap_sync =
+	    (mmutype == MMU_68040) ? _bus_dmamap_sync_0460
+				   : _bus_dmamap_sync_030;
 
 	bootinfo_enumerate(mainbus_attach_litex, self);
 

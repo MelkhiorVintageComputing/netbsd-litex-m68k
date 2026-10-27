@@ -208,11 +208,13 @@ pmap_bootstrap(paddr_t nextpa, paddr_t firstpa)
 			protoste += (SG4_LEV2SIZE * sizeof(st_entry_t));
 		}
 		/*
-		 * Initialize the final level 1 descriptor to map the next
-		 * block of level 2 descriptors for Sysptmap.
+		 * Initialize the level 1 descriptor for Sysmap's 32MB to map
+		 * the next block of level 2 descriptors for Sysptmap.
+		 * LiteX-68K: not the last one, as on ports whose KVA ends at
+		 * the top of the address space; ours stops below the CSRs.
 		 */
 		ste = (st_entry_t *)kstpa;
-		ste = &ste[SG4_LEV1SIZE - 1];
+		ste = &ste[LA40_RI(SYSMAP_VA)];
 		*ste = protoste;
 		/*
 		 * protoste contains the L2 table address that will

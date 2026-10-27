@@ -77,6 +77,9 @@
 	.space	PAGE_SIZE
 ASLOCAL(tmpstk)
 
+/* Page descriptors in a 68040 page table: 256KB worth of pages. */
+#define	NPTE40		(1 << (18 - PGSHIFT))
+
 /*
  * Macro to relocate a symbol, used before MMU is enabled.
  */
@@ -123,8 +126,41 @@ ASENTRY_NOPROFILE(start)
 	lea	%pc@(_ASM_LABEL(start)),%a5
 	subl	#_ASM_LABEL(start),%a5	| firstpa: load PA - link VA (a5)
 
+	/*
+	 * Which MMU: the bootinfo's BI_MMUTYPE, read now at its PA (it
+	 * follows the kernel), since the bootstrap map depends on it.
+	 * bootinfo_start() sets cputype, fputype and mmutype again later.
+	 */
+	RELOC(end,%a0)
+Lbiscan:
+	movw	%a0@,%d0		| tag
+	cmpw	#BI_LAST,%d0
+	jeq	Lbidone
+	cmpw	#BI_MMUTYPE,%d0
+	jne	Lbinext
+	movl	%a0@(4),%d0
+	andl	#BI_MMU_68040,%d0
+	jeq	Lbinext
+	RELOC(mmutype,%a1)
+	movl	#MMU_68040,%a1@
+Lbinext:
+	moveq	#0,%d0
+	movw	%a0@(2),%d0		| record size, header included
+	addl	%d0,%a0
+	jra	Lbiscan
+Lbidone:
+
+	RELOC(mmutype,%a0)
+	cmpl	#MMU_68040,%a0@
+	jne	Lcacheoff030
+	moveq	#0,%d0
+	movc	%d0,%cacr		| disable the 68040's caches
+	.word	0xf4f8			| cpusha bc: push and invalidate them
+	jra	Lcacheoff
+Lcacheoff030:
 	movl	#CACHE_OFF,%d0
 	movc	%d0,%cacr		| clear and disable on-chip cache(s)
+Lcacheoff:
 
 	EARLY_PUTC(0x41)		| 'A': running
 
@@ -148,6 +184,10 @@ ASENTRY_NOPROFILE(start)
 	 *    pmap_bootstrap(), keep working;
 	 *  - TT0: the CSRs, VA==PA, cache-inhibited (as from now on).
 	 */
+	RELOC(mmutype,%a0)
+	cmpl	#MMU_68040,%a0@
+	jeq	Lboot040
+
 	ASRELOC(Lboottab,%a0)
 	movl	%a5,%d0
 	orl	#1,%d0			| DT = page descriptor
@@ -168,8 +208,65 @@ ASENTRY_NOPROFILE(start)
 	ASRELOC(Lboottc,%a0)
 	pmove	%a0@,%tc		| MMU on
 	jmp	Lbootmapped:l		| and go to our VA
+
+	/*
+	 * The 68040 has fixed three-level tables and no early termination:
+	 *  - Lboot40pt: 128 page tables of 256KB (NPTE40 pages each), VA
+	 *    0-32MB onto the RAM from firstpa;
+	 *  - Lboot40ptr: the pointer table, one entry per page table;
+	 *  - Lboot40root: the root table, its first entry only;
+	 *  - ITT1 and DTT1 for RAM VA==PA, DTT0 for the CSRs.
+	 */
+Lboot040:
+	ASRELOC(Lboot40pt,%a0)
+	movl	%a5,%d0
+	orl	#PG_V,%d0		| PTE40_RESIDENT
+	movl	#128*NPTE40-1,%d1
+2:	movl	%d0,%a0@+
+	addl	#PAGE_SIZE,%d0
+	dbra	%d1,2b
+
+	ASRELOC(Lboot40ptr,%a0)
+	ASRELOC(Lboot40pt,%a1)
+	movl	%a1,%d0
+	orl	#SG_V,%d0		| UTE40_RESIDENT
+	moveq	#127,%d1
+3:	movl	%d0,%a0@+
+	addl	#NPTE40*4,%d0		| next page table
+	dbra	%d1,3b
+
+	ASRELOC(Lboot40root,%a0)
+	ASRELOC(Lboot40ptr,%a1)
+	movl	%a1,%d0
+	orl	#SG_V,%d0		| UTE40_RESIDENT
+	movl	%d0,%a0@		| VA 0-32MB
+	movl	%a0,%d0
+	.long	0x4e7b0807		| movc %d0,%srp
+	.long	0x4e7b0806		| movc %d0,%urp
+	moveq	#0,%d0
+	.long	0x4e7b0004		| movc %d0,%itt0
+	movl	#LITEX68K_TT40_RAM_BOOT,%d0
+	.long	0x4e7b0005		| movc %d0,%itt1
+	.long	0x4e7b0007		| movc %d0,%dtt1
+	movl	#LITEX68K_TT40_IO,%d0
+	.long	0x4e7b0006		| movc %d0,%dtt0
+	.word	0xf518			| pflusha
+	movl	#MMU40_TCR_BITS,%d0
+	.long	0x4e7b0003		| movc %d0,%tc: MMU on
+	jmp	Lbootmapped:l		| and go to our VA
+
 Lbootmapped:
 	lea	_ASM_LABEL(tmpstk),%sp	| the temporary stack, by its VA
+
+#ifdef LITEX68K_EARLYCONS
+	/* Until vec_init(), report any exception (Learlytrap). */
+	lea	_ASM_LABEL(Learlyvec),%a0
+	movc	%a0,%vbr
+	movl	#255,%d1
+	lea	_ASM_LABEL(Learlytrap),%a1
+1:	movl	%a1,%a0@+
+	dbra	%d1,1b
+#endif
 
 	EARLY_PUTC(0x42)		| 'B': bootstrap map on
 
@@ -209,9 +306,25 @@ Lbootmapped:
 
 /*
  * Switch to the real page tables.  They map the kernel at the same VAs
- * as the bootstrap map, so we just load them.  mmu_tt30[] turns TT1 off.
+ * as the bootstrap map, so we just load them.  mmu_tt30[] turns TT1 off,
+ * mmu_tt40[] ITT1 and DTT1.
  */
 	movl	_C_LABEL(Sysseg_pa),%d1	| system segment table addr (a PA)
+	cmpl	#MMU_68040,_C_LABEL(mmutype)
+	jne	Lnot040mmu
+	.long	0x4e7b1807		| movc %d1,%srp
+	.long	0x4e7b1806		| movc %d1,%urp: no more bootstrap map
+	pea	_C_LABEL(mmu_tt40)	| TT reg values
+	jbsr	_C_LABEL(mmu_load_tt40)
+	addql	#4,%sp
+	.word	0xf4d8			| cinva bc
+	.word	0xf518			| pflusha
+	movl	#MMU40_TCR_BITS,%d0
+	.long	0x4e7b0003		| movc %d0,%tc
+	movl	#0x80008000,%d0
+	movc	%d0,%cacr		| turn on both caches
+	jra	Lmmuenabled
+Lnot040mmu:
 	lea	_C_LABEL(protorp),%a0
 	movl	%d1,%a0@(4)		| segtable address
 	pmove	%a0@,%srp		| load the supervisor root pointer
@@ -275,6 +388,75 @@ Lenab3:
 	movl	%sp,%a0@(L_MD_REGS)	|   in lwp0.l_md.md_regs
 
 	jra	_C_LABEL(main)		| main()
+
+#ifdef LITEX68K_EARLYCONS
+/*
+ * An exception before vec_init(): print "!" and the format/vector word,
+ * the PC and, for a 68040 access error (format $7), the fault address and
+ * the SSW; then the SP and the 32 longs from it (the frame, then what the
+ * code had stacked), and stop.  No stack: Learlyhex returns through %a2.
+ */
+ASLOCAL(Learlytrap)
+	movw	#PSL_HIGHIPL,%sr
+	movl	%sp,%a3
+	EARLY_PUTC(0x21)		| '!'
+	moveq	#0,%d2
+	movw	%a3@(6),%d2		| format/vector
+	moveq	#3,%d3
+	lea	1f,%a2
+	jra	Learlyhex
+1:	movl	%a3@(2),%d2		| PC
+	moveq	#7,%d3
+	lea	2f,%a2
+	jra	Learlyhex
+2:	movw	%a3@(6),%d2
+	andw	#0xf000,%d2
+	cmpw	#0x7000,%d2
+	jne	4f
+	movl	%a3@(0x14),%d2		| FA
+	moveq	#7,%d3
+	lea	3f,%a2
+	jra	Learlyhex
+3:	moveq	#0,%d2
+	movw	%a3@(0xc),%d2		| SSW
+	moveq	#3,%d3
+	lea	4f,%a2
+	jra	Learlyhex
+4:	movl	%a3,%d2			| SP, then the 32 longs from it
+	moveq	#7,%d3
+	lea	8f,%a2
+	jra	Learlyhex
+8:	moveq	#31,%d6
+9:	movl	%a3@+,%d2
+	moveq	#7,%d3
+	lea	10f,%a2
+	jra	Learlyhex
+10:	dbra	%d6,9b
+11:	stop	#PSL_HIGHIPL
+	jra	11b
+
+	/* Print " " and the low %d3+1 nibbles of %d2; return to %a2. */
+Learlyhex:
+	EARLY_PUTC(0x20)
+	movl	%d3,%d4
+	lsll	#2,%d4
+	rorl	%d4,%d2			| first nibble to print at the top
+	rorl	#4,%d2
+5:	roll	#4,%d2
+	movl	%d2,%d5
+	andl	#0xf,%d5
+	cmpl	#10,%d5
+	jlt	6f
+	addl	#0x41-0x30-10,%d5
+6:	addl	#0x30,%d5
+	movl	#LITEX68K_EARLYCONS,%a1
+7:	movl	%a1@(4),%d0
+	btst	#0,%d0
+	jne	7b
+	movl	%d5,%a1@
+	dbra	%d3,5b
+	jmp	%a2@
+#endif
 
 /*
  * Trap/interrupt vector routines
@@ -638,6 +820,21 @@ ASLOCAL(Lboottc)
 ASLOCAL(Lboottt)
 	.long	MACHINE_TT0		| TT0: the CSRs
 	.long	LITEX68K_TT30_RAM_BOOT	| TT1: RAM VA==PA
+
+#ifdef LITEX68K_EARLYCONS
+	.balign	4
+ASLOCAL(Learlyvec)
+	.space	256*4			| all to Learlytrap
+#endif
+
+/* The 68040's (see Lboot040). */
+	.balign	512
+ASLOCAL(Lboot40root)
+	.space	128*4			| 128 x 32MB, the first one used
+ASLOCAL(Lboot40ptr)
+	.space	128*4			| 128 x 256KB
+ASLOCAL(Lboot40pt)
+	.space	128*NPTE40*4		| 128 x 256KB
 
 GLOBAL(mmutype)
 	.long	MMU_68030	| default to MMU_68030

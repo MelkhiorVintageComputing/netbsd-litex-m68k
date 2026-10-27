@@ -355,7 +355,7 @@ identifycpu(void)
 
 #ifdef M68040
 	case CPU_68040:
-		cpu_str = "MC68040";
+		cpu_str = fputype == FPU_NONE ? "MC68LC040" : "MC68040";
 		break;
 #endif
 
@@ -376,6 +376,9 @@ identifycpu(void)
 	switch (cputype) {
 	case CPU_68030:
 		cache_str = ", 256+256 on-chip I/D caches";
+		break;
+	case CPU_68040:
+		cache_str = ", 4k+4k on-chip I/D caches";
 		break;
 	default:
 		cache_str = "";

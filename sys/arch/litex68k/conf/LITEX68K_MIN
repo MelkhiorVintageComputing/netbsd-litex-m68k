@@ -14,7 +14,9 @@ makeoptions	COPTS="-O2 -fno-reorder-blocks"	# see share/mk/sys.mk
 makeoptions     COPY_SYMTAB=1
 
 options		M68030
-options 	FPU_EMULATE		# for an SoC without RD68884
+options		M68040
+options 	FPU_EMULATE		# for an SoC without an FPU
+options 	FPSP			# the MC68040's missing FP instructions
 
 # Polled UART for locore's markers (this bitstream's BI_LITEX_UART).
 options 	LITEX68K_EARLYCONS=0xf0005000

@@ -30,13 +30,18 @@ makeoptions	COPTS="-O2 -fno-reorder-blocks"	# see share/mk/sys.mk
 # because litexboot only loads the kernel's PT_LOAD segments.
 makeoptions     COPY_SYMTAB=1
 
-# CPUs this kernel supports
+# CPUs this kernel supports: RD68031 (MC68030) and RD68041 (MC68040)
 options		M68030
+options		M68040
 
 maxusers	16
 
-# The SoC may be built without RD68884 (the MC68881): emulate the FPU then.
+# The SoC may be built without an FPU (no RD68884 beside RD68031, or
+# RD68041 as an MC68LC040): emulate the FPU then.
 options 	FPU_EMULATE
+
+# The MC68040 leaves some FP instructions to software.
+options 	FPSP
 
 options 	DDB
 #options 	DIAGNOSTIC
