@@ -430,9 +430,14 @@ trap(struct frame *fp, int type, unsigned int code, unsigned int v)
 	case T_FPEMULI|T_USER:	/* unimplemented FP instruction */
 	case T_FPEMULD|T_USER:	/* unimplemented FP data type */
 #ifdef FPU_EMULATE
-		/* No FPU (an SoC built without RD68884): emulate it. */
+		/*
+		 * No FPU (RD68031 without RD68884, or RD68041 as an
+		 * MC68LC040): emulate it.  ksi is filled only when the
+		 * instruction raises a signal.
+		 */
 		if (fputype == FPU_NONE) {
-			(void)fpu_emulate(fp, &pcb->pcb_fpregs, &ksi);
+			if (fpu_emulate(fp, &pcb->pcb_fpregs, &ksi) == 0)
+				goto out;
 			break;
 		}
 #endif
