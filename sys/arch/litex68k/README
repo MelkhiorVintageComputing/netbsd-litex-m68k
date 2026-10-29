@@ -3,10 +3,13 @@ $NetBSD$
 NetBSD/litex68k: LiteX-68K
 ==========================
 
-LiteX-68K is a LiteX SoC around RD68031, an MC68030 soft-core with its MMU
-and caches, optionally with RD68884 (an MC68881), on an FPGA board (the
-QMTech Wukong V3).  This port is derived from virt68k and runs the stock
-NetBSD/m68k userland (MACHINE_ARCH=m68k).
+LiteX-68K is a LiteX SoC on an FPGA board (the QMTech Wukong V3) around one
+of two soft-cores:
+	RD68031		an MC68030 with its MMU and caches, optionally with
+			RD68884 (an MC68881)
+	RD68041		an MC68040 (with its FPU) or an MC68LC040 (without)
+This port is derived from virt68k and runs the stock NetBSD/m68k userland
+(MACHINE_ARCH=m68k).  One GENERIC kernel runs on both CPUs.
 
 Booting
 -------
@@ -22,8 +25,10 @@ VA = PA - firstpa (the classic m68k pmap layout).  locore computes firstpa
 from where it was loaded, turns the MMU on with a bootstrap map (VA 0-256MB
 onto RAM by a level A table, RAM VA==PA by TT1, the CSRs by TT0) so that C
 code runs before the page tables exist, parses the bootinfo, builds the page
-tables, and switches to them (TT1 off).  The CSRs (0xf000.0000 and up) stay
-mapped VA==PA by TT0, and the kernel's VA space stops below them.
+tables, and switches to them (TT1 off).  The MC68030 and MC68040 take
+different paths there: their MMU, transparent translation and cache control
+registers differ.  The CSRs (0xf000.0000 and up) stay mapped VA==PA by TT0,
+and the kernel's VA space stops below them.
 
 Devices
 -------
@@ -39,8 +44,18 @@ From the device tree litexboot passes (BI_LITEX_DTB):
 	litesdcard	LiteSDCard, an sdmmc(4) host: ld(4)
 	liteeth		LiteEth MAC, MDIO bit-banged: rgephy(4)
 
-FPU: BI_FPUTYPE says whether RD68884 is there; without it, FPU_EMULATE
-emulates the MC68881.
+FPU: BI_FPUTYPE says which FPU there is.  The MC68040's FPU needs FPSP for
+the instructions it leaves to software; without an FPU (RD68031 alone, or
+the MC68LC040), FPU_EMULATE emulates the MC68881.
+
+Thread pointer
+--------------
+
+NetBSD/m68k has no user-readable thread register: every __thread access,
+and so most malloc()/free() calls, is an _lwp_getprivate system call.  With
+options LITEX68K_FAST_GETPRIVATE (in GENERIC), locore's trap #0 handler
+returns it directly, about 4 times faster; traced (ktrace) and non-native
+processes still go through syscall().
 
 Clean room
 ----------
@@ -52,5 +67,22 @@ Motorola manuals.  No GPL code (Linux, QEMU) was used.
 Testing
 -------
 
-	./build.sh -m litex68k tools kernel=LITEX68K_MIN
-	litex-68k/scripts/board.py boot --kernel netbsd [--initrd ramdisk.fs]
+	./build.sh -m litex68k tools kernel=GENERIC release
+	litex-68k/scripts/board.py --bitstream DIR boot --kernel netbsd \
+	    [--initrd ramdisk.fs] [--cmdline root=ld0a]
+	litex-68k/scripts/board.py --bitstream DIR sdboot
+
+LITEX68K_MIN is a smaller kernel, quicker to upload over the serial line.
+board.py boot uploads the kernel through the serial line; sdboot starts the
+kernel and parameters (params.bin, with the kernel command line) from the
+SD card's first partition, a FAT file system (ld0e under NetBSD).
+
+The programs in test/ are built with the cross compiler and run on the
+board:
+	fptest		FPU context switching: processes (and signal
+			handlers) preempting each other mid-workload
+	fpstress	each FPU operation, compared with its first pass
+			(run two at once)
+	fpround		an FPU operand straddling a faulting page, with
+			signal handlers, yields and FPCR changes
+	tlsbench	system call, thread pointer and malloc()/free() costs
