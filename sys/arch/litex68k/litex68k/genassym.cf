@@ -108,9 +108,13 @@ define	L_MD_FLAGS		offsetof(struct lwp, l_md.md_flags)
 define	P_FLAG			offsetof(struct proc, p_flag)
 define	P_RASLIST		offsetof(struct proc, p_raslist)
 define	P_VMSPACE		offsetof(struct proc, p_vmspace)
+define	P_EMUL			offsetof(struct proc, p_emul)
+define	P_TRACE_ENABLED		offsetof(struct proc, p_trace_enabled)
+define	L_PRIVATE		offsetof(struct lwp, l_private)
 
 # interrupt/fault metering
 define	CI_NINTR		offsetof(struct cpu_info, ci_data.cpu_nintr)
+define	CI_NSYSCALL		offsetof(struct cpu_info, ci_data.cpu_nsyscall)
 
 # PSL values (should just include psl.h?)
 define	PSL_S			PSL_S
@@ -118,6 +122,7 @@ define	PSL_IPL7		PSL_IPL7
 define	PSL_LOWIPL		PSL_LOWIPL
 define	PSL_HIGHIPL		PSL_HIGHIPL
 define	PSL_USER		PSL_USER
+define	PSL_C			PSL_C
 define	PSL_TS			PSL_T | PSL_S
 define	SPL1			PSL_S | PSL_IPL1
 define	SPL2			PSL_S | PSL_IPL2
@@ -176,6 +181,7 @@ define	FPF_FPI			offsetof(struct fpframe, fpf_fpiar)
 
 # system calls
 define	SYS_exit		SYS_exit
+define	SYS__lwp_getprivate	SYS__lwp_getprivate
 define	SYS_execve		SYS_execve
 define	SYS_compat_16___sigreturn14	SYS_compat_16___sigreturn14
 define	SYS_compat_13_sigreturn13 SYS_compat_13_sigreturn13

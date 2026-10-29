@@ -6,6 +6,7 @@
 maxpartitions 8
 
 defparam opt_litex68k.h	LITEX68K_EARLYCONS	# PA of a polled UART
+defflag	opt_litex68k.h	LITEX68K_FAST_GETPRIVATE # _lwp_getprivate in locore
 
 # Generic devices
 include "dev/scsipi/files.scsipi"		# SCSI

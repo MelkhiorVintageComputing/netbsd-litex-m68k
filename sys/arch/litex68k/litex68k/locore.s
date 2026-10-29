@@ -562,6 +562,38 @@ ENTRY_NOPROFILE(badtrap)
 	jra	_ASM_LABEL(rei)		| all done
 
 ENTRY_NOPROFILE(trap0)
+#ifdef LITEX68K_FAST_GETPRIVATE
+	/*
+	 * _lwp_getprivate() is what every TLS access does on m68k
+	 * (__m68k_read_tp), so jemalloc makes it several times per
+	 * malloc/free.  Answer it here, without the full syscall path,
+	 * for a native process that isn't traced (ktrace, ptrace) and
+	 * has no AST pending; anything else takes the full path.  The
+	 * user's registers are all kept but %d0, as syscall() does it.
+	 */
+	cmpl	#SYS__lwp_getprivate,%d0
+	jne	Ltrap0_full
+	tstl	_C_LABEL(astpending)
+	jne	Ltrap0_full
+	movl	%a0,%sp@-		| the user's %a0
+	movl	_C_LABEL(curlwp),%a0
+	movl	%a0@(L_PROC),%a0
+	tstb	%a0@(P_TRACE_ENABLED)	| syscall_fancy() then
+	jne	Ltrap0_full_a0
+	cmpl	#_C_LABEL(emul_netbsd),%a0@(P_EMUL)
+	jne	Ltrap0_full_a0
+	movl	_C_LABEL(curlwp),%a0
+	movl	%a0@(L_PRIVATE),%d0	| the syscall's value
+	addql	#1,_C_LABEL(cpu_info_store)+CI_NSYSCALL+4 | int64_t
+	jcc	1f
+	addql	#1,_C_LABEL(cpu_info_store)+CI_NSYSCALL
+1:	movl	%sp@+,%a0
+	andw	#~PSL_C,%sp@		| success: carry clear
+	rte
+Ltrap0_full_a0:
+	movl	%sp@+,%a0
+Ltrap0_full:
+#endif
 	clrl	%sp@-			| stack adjust count
 	moveml	#0xFFFF,%sp@-		| save user registers
 	movl	%usp,%a0		| save the user SP

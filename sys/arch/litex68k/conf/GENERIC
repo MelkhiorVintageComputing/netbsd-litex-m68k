@@ -43,6 +43,10 @@ options 	FPU_EMULATE
 # The MC68040 leaves some FP instructions to software.
 options 	FPSP
 
+# Answer _lwp_getprivate (every TLS access, so every malloc/free) in locore
+# rather than through syscall(); traced processes still take the full path.
+options 	LITEX68K_FAST_GETPRIVATE
+
 options 	DDB
 #options 	DIAGNOSTIC
 #options 	LOCKDEBUG
