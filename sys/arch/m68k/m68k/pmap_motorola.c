@@ -781,15 +781,18 @@ pmap_release(pmap_t pmap)
 		panic("pmap_release count");
 #endif
 
+	/*
+	 * The segment table is freed with the last PT page (pm_sref), so
+	 * with no segment table there is no PT page left in the PT window
+	 * and nothing mapped there: only its VA is left to free.  Walking
+	 * the window's 1024 pages (pmap_remove(), uvm_km_pgremove()) cost
+	 * every exit and exec tens of milliseconds.
+	 */
+	KASSERT(pmap->pm_stab == Segtabzero);
 	if (pmap->pm_ptab) {
-		pmap_remove(pmap_kernel(), (vaddr_t)pmap->pm_ptab,
-		    (vaddr_t)pmap->pm_ptab + M68K_MAX_PTSIZE);
-		uvm_km_pgremove((vaddr_t)pmap->pm_ptab,
-		    (vaddr_t)pmap->pm_ptab + M68K_MAX_PTSIZE);
 		uvm_km_free(pt_map, (vaddr_t)pmap->pm_ptab,
 		    M68K_MAX_PTSIZE, UVM_KMF_VAONLY);
 	}
-	KASSERT(pmap->pm_stab == Segtabzero);
 }
 
 /*
