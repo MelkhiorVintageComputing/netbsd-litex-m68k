@@ -36,6 +36,10 @@ CMACHFLAGS=	-m68020-60 -Wa,-m68030 -Wa,-mcpu=68030 -Wa,-m68851
 
 CFLAGS+=	${CMACHFLAGS} -msoft-float
 AFLAGS+=	-x assembler-with-cpp
+.if !empty(PROF)
+# m68k's mcount follows the %a6 frame chain, which -O2 alone breaks.
+CFLAGS+=	-fno-omit-frame-pointer
+.endif
 
 ##
 ## (3) libkern and compat

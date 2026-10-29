@@ -91,6 +91,18 @@ ASLOCAL(tmpstk)
 #define	ASRELOC(var, ar)	_RELOC(_ASM_LABEL(var), ar)
 
 /*
+ * Push a frame that ends the %a6 chain on a new stack: its saved %a6 is
+ * itself and its return address 0.  A profiling kernel's __mcount reads
+ * its caller's frame, and %a6 is otherwise the bootloader's, unmapped
+ * once the bootstrap map is gone.
+ */
+#define	ENDFRAME			\
+	clrl	%sp@-;			\
+	subql	#4,%sp;			\
+	movl	%sp,%sp@;		\
+	movl	%sp,%a6
+
+/*
  * Early console: a polled LiteUART at a fixed physical address, for
  * bring-up only (options LITEX68K_EARLYCONS=0xf0005000).  It is reached
  * VA==PA, both before the MMU is on and through TT0 after.
@@ -257,6 +269,7 @@ Lboot040:
 
 Lbootmapped:
 	lea	_ASM_LABEL(tmpstk),%sp	| the temporary stack, by its VA
+	ENDFRAME
 
 #ifdef LITEX68K_EARLYCONS
 	/* Until vec_init(), report any exception (Learlytrap). */
@@ -344,12 +357,14 @@ Lmmuenabled:
  * Should be running mapped from this point on
  */
 	lea	_ASM_LABEL(tmpstk),%sp	| re-load the temporary stack
+	ENDFRAME
 	jbsr	_C_LABEL(vec_init)	| initialize the vector table
 /* call final pmap setup */
 	jbsr	_C_LABEL(pmap_bootstrap_finalize)
 /* set kernel stack, user SP */
 	movl	_C_LABEL(lwp0uarea),%a1	| get lwp0 uarea
 	lea	%a1@(USPACE-4),%sp	| set kernel stack to end of area
+	ENDFRAME
 	movl	#USRSTACK-4,%a2
 	movl	%a2,%usp		| init user SP
 	tstl	_C_LABEL(fputype)	| Have an FPU?
