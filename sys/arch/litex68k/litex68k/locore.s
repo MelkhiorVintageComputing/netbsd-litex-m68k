@@ -887,7 +887,7 @@ Laststkadj:
  */
 ENTRY_NOPROFILE(cpu_spinup_trampoline)
 	movw	#PSL_HIGHIPL,%sr
-	movl	%sp,%a5			| the hatch, by its PA
+	lea	%sp@(-HATCH_CI),%a5	| the hatch, by its PA (%sp = &h_ci)
 	moveq	#0,%d0
 	movc	%d0,%cacr		| caches off (as reset left them)
 	.word	0xf4d8			| cinva bc
