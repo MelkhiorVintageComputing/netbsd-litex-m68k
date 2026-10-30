@@ -33,6 +33,10 @@
 #ifndef _LITEX68K_INTR_H_
 #define _LITEX68K_INTR_H_
 
+#if defined(_KERNEL_OPT)
+#include "opt_multiprocessor.h"
+#endif
+
 #include <machine/psl.h>
 
 /*
@@ -45,10 +49,15 @@
  * one above it, on a level nothing interrupts at, to keep it distinct
  * from IPL_VM; IPL 1 stays the soft interrupt level, as on the other
  * m68k ports.
+ *
+ * The two-processor builds interrupt the other CPU at level 5
+ * (litexsmp(4)), and IPIs must wait at IPL_SCHED: with MULTIPROCESSOR,
+ * IPL_SCHED is level 5 (splsched() here, ipl2psl_table in machdep.c).
  */
 
 #define	NIRQ		32	/* lines in irq_pending / irq_mask */
 #define	LITEX_IRQ_IPL	2	/* the CPU level they all arrive on */
+#define	LITEX_IPI_IPL	5	/* interprocessor interrupts */
 
 #define	IPL_NONE	0
 #define	IPL_SOFTCLOCK	1	/* clock software interrupts */
@@ -73,7 +82,11 @@ typedef struct {
 #define splsoftnet()		splraise1()
 #define splsoftserial()		splraise1()
 #define splvm()			splraise2()
+#ifdef MULTIPROCESSOR
+#define splsched()		splraise5()
+#else
 #define splsched()		splraise3()
+#endif
 #define splhigh()		spl7()
 
 #ifndef _LOCORE
@@ -107,6 +120,9 @@ splx(int sr)
 
 void	intr_init(void);
 void	*intr_establish(int (*)(void *), void *, int, int, int);
+void	*intr_establish_cpu(int (*)(void *), void *, int, int, int, u_int);
+struct clockframe;
+extern void (*litex68k_ipi_intr)(struct clockframe *);
 void	intr_disestablish(void *);
 const char *intr_string(void *, char *, size_t);
 

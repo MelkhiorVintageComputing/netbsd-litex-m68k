@@ -45,6 +45,7 @@
 #include "opt_kgdb.h"
 #include "opt_lockdebug.h"
 #include "opt_m68k_arch.h"
+#include "opt_multiprocessor.h"
 #include "opt_fpu_emulate.h"
 #include "opt_litex68k.h"
 
@@ -271,6 +272,16 @@ Lbootmapped:
 	lea	_ASM_LABEL(tmpstk),%sp	| the temporary stack, by its VA
 	ENDFRAME
 
+#ifdef MULTIPROCESSOR
+	/*
+	 * curcpu() is found through the VBR (<m68k/cpu.h>), and C code
+	 * runs from here on: point the VBR at the boot CPU's vector
+	 * table, by its VA, until vec_init() does it for good.
+	 */
+	lea	_C_LABEL(vectab),%a0
+	movc	%a0,%vbr
+#endif
+
 #ifdef LITEX68K_EARLYCONS
 	/* Until vec_init(), report any exception (Learlytrap). */
 	lea	_ASM_LABEL(Learlyvec),%a0
@@ -279,6 +290,9 @@ Lbootmapped:
 	lea	_ASM_LABEL(Learlytrap),%a1
 1:	movl	%a1,%a0@+
 	dbra	%d1,1b
+#ifdef MULTIPROCESSOR
+	movl	#_C_LABEL(cpu_info_store),%a0@ | its cpu_info, as vectab's
+#endif
 #endif
 
 	EARLY_PUTC(0x42)		| 'B': bootstrap map on
@@ -359,6 +373,10 @@ Lmmuenabled:
 	lea	_ASM_LABEL(tmpstk),%sp	| re-load the temporary stack
 	ENDFRAME
 	jbsr	_C_LABEL(vec_init)	| initialize the vector table
+#ifdef MULTIPROCESSOR
+	GETCURCPU(%a0)			| tmpstk is the boot CPU's
+	movl	%sp,%a0@(CI_TMPSTK)	|   scratch stack
+#endif
 /* call final pmap setup */
 	jbsr	_C_LABEL(pmap_bootstrap_finalize)
 /* set kernel stack, user SP */
@@ -541,7 +559,7 @@ ENTRY_NOPROFILE(fpfault)
 	movl	%usp,%a0	| and save
 	movl	%a0,%sp@(FR_SP)	|   the user stack pointer
 	clrl	%sp@-		| no VA arg
-	movl	_C_LABEL(curpcb),%a0 | current pcb
+	GETCURPCB(%a0)		| current pcb
 	lea	%a0@(PCB_FPCTX),%a0 | address of FP savearea
 	fsave	%a0@		| save state
 #if defined(M68040) || defined(M68060)
@@ -588,6 +606,33 @@ ENTRY_NOPROFILE(trap0)
 	 */
 	cmpl	#SYS__lwp_getprivate,%d0
 	jne	Ltrap0_full
+#ifdef MULTIPROCESSOR
+	/*
+	 * The same with this CPU's cpu_info, in %a1.  The trap can't
+	 * move to another CPU before it returns: there is no kernel
+	 * preemption.
+	 */
+	moveml	#0x00c0,%sp@-		| the user's %a0-%a1
+	GETCURCPU(%a1)
+	tstl	%a1@(CI_ASTPENDING)
+	jne	Ltrap0_full_a0
+	movl	%a1@(CI_CURLWP),%a0
+	movl	%a0@(L_PROC),%a0
+	tstb	%a0@(P_TRACE_ENABLED)	| syscall_fancy() then
+	jne	Ltrap0_full_a0
+	cmpl	#_C_LABEL(emul_netbsd),%a0@(P_EMUL)
+	jne	Ltrap0_full_a0
+	movl	%a1@(CI_CURLWP),%a0
+	movl	%a0@(L_PRIVATE),%d0	| the syscall's value
+	addql	#1,%a1@(CI_NSYSCALL+4)	| int64_t
+	jcc	1f
+	addql	#1,%a1@(CI_NSYSCALL)
+1:	moveml	%sp@+,#0x0300		| (moveml leaves the CCR alone)
+	andw	#~PSL_C,%sp@		| success: carry clear
+	rte
+Ltrap0_full_a0:
+	moveml	%sp@+,#0x0300
+#else
 	tstl	_C_LABEL(astpending)
 	jne	Ltrap0_full
 	movl	%a0,%sp@-		| the user's %a0
@@ -607,6 +652,7 @@ ENTRY_NOPROFILE(trap0)
 	rte
 Ltrap0_full_a0:
 	movl	%sp@+,%a0
+#endif
 Ltrap0_full:
 #endif
 	clrl	%sp@-			| stack adjust count
@@ -616,7 +662,12 @@ Ltrap0_full:
 	movl	%d0,%sp@-		| push syscall number
 	jbsr	_C_LABEL(syscall)	| handle it
 	addql	#4,%sp			| pop syscall arg
+#ifdef MULTIPROCESSOR
+	GETCURCPU(%a0)			| (a0 is restored below)
+	tstl	%a0@(CI_ASTPENDING)	| AST pending?
+#else
 	tstl	_C_LABEL(astpending)	| AST pending?
+#endif
 	jne	Lrei1			| Yup, go deal with it.
 	movl	%sp@(FR_SP),%a0		| grab and restore
 	movl	%a0,%usp		|   user SP
@@ -630,7 +681,7 @@ Ltrap0_full:
  * command in d0, addr in a1, length in d1
  */
 ENTRY_NOPROFILE(trap12)
-	movl	_C_LABEL(curlwp),%a0
+	GETCURLWP(%a0)
 	movl	%a0@(L_PROC),%sp@-	| push current proc pointer
 	movl	%d1,%sp@-		| push length
 	movl	%a1,%sp@-		| push addr
@@ -750,11 +801,21 @@ Lbrkpt3:
  */
 
 ENTRY_NOPROFILE(intrhand_autovec)
+#ifdef MULTIPROCESSOR
+	INTERRUPT_SAVEREG
+	GETCURCPU(%a0)
+	addql	#1,%a0@(CI_IDEPTH)
+	jbsr	_C_LABEL(intr_dispatch)	| call dispatcher
+	GETCURCPU(%a0)
+	subql	#1,%a0@(CI_IDEPTH)
+	INTERRUPT_RESTOREREG
+#else
 	addql	#1,_C_LABEL(intr_depth)
 	INTERRUPT_SAVEREG
 	jbsr	_C_LABEL(intr_dispatch)	| call dispatcher
 	INTERRUPT_RESTOREREG
 	subql	#1,_C_LABEL(intr_depth)
+#endif
 
 	/* FALLTHROUGH to rei */
 
@@ -770,7 +831,14 @@ ENTRY_NOPROFILE(intrhand_autovec)
  * necessitating a stack cleanup.
  */
 ASENTRY_NOPROFILE(rei)
+#ifdef MULTIPROCESSOR
+	movl	%a0,%sp@-		| all registers are live here
+	GETCURCPU(%a0)
+	tstl	%a0@(CI_ASTPENDING)	| AST pending?
+	movl	%sp@+,%a0		| (movea does not change the CCR)
+#else
 	tstl	_C_LABEL(astpending)	| AST pending?
+#endif
 	jeq	Ldorte			| Nope. Just return.
 	btst	#5,%sp@			| Returning to kernel mode?
 	jne	Ldorte			| Yup. Can't do ASTs
@@ -805,6 +873,62 @@ Laststkadj:
 	movl	%sp@,%sp		| and our SP
 	rte				| and do real RTE
 
+#ifdef MULTIPROCESSOR
+/*
+ * CPU 1 starts here (litexsmp(4)): the ROM's crt0 jumps to BOOT_PC, the
+ * PA of this code, with %sp = BOOT_SP, the PA of its struct
+ * litex68k_hatch (litex68k/cpu_mp.h), and the MMU, the TTRs and the
+ * caches off, at IPL 7.  Turn the MMU on as the boot CPU did: the
+ * kernel's segment table, with the bootstrap map's TTs for RAM VA==PA
+ * (so that this code and the hatch stay reachable by their PAs) and for
+ * the CSRs; go to our VA; drop the RAM TTs (leaving mmu_tt40[]'s values)
+ * before any other VA is used, as one could be in their range; then the
+ * idle lwp's stack, the caches, our own VBR, and cpu_hatch(ci).
+ */
+ENTRY_NOPROFILE(cpu_spinup_trampoline)
+	movw	#PSL_HIGHIPL,%sr
+	movl	%sp,%a5			| the hatch, by its PA
+	moveq	#0,%d0
+	movc	%d0,%cacr		| caches off (as reset left them)
+	.word	0xf4d8			| cinva bc
+	moveq	#FC_USERD,%d0		| user space
+	movc	%d0,%sfc		|   as source
+	movc	%d0,%dfc		|   and destination of transfers
+	movl	%a5@(HATCH_SRP),%d1	| Sysseg_pa
+	.long	0x4e7b1807		| movc %d1,%srp
+	.long	0x4e7b1806		| movc %d1,%urp
+	moveq	#0,%d0
+	.long	0x4e7b0004		| movc %d0,%itt0
+	movl	#LITEX68K_TT40_RAM_BOOT,%d0
+	.long	0x4e7b0005		| movc %d0,%itt1
+	.long	0x4e7b0007		| movc %d0,%dtt1
+	movl	#LITEX68K_TT40_IO,%d0
+	.long	0x4e7b0006		| movc %d0,%dtt0
+	.word	0xf518			| pflusha
+	movl	#MMU40_TCR_BITS,%d0
+	.long	0x4e7b0003		| movc %d0,%tc: MMU on
+	jmp	Lhatchmapped:l		| and go to our VA
+Lhatchmapped:
+	movl	%a5@(HATCH_CI),%a4	| (the hatch still by its PA, TT1)
+	movl	%a5@(HATCH_VBR),%a3
+	movl	%a5@(HATCH_SP),%a2
+	moveq	#0,%d0
+	.long	0x4e7b0005		| movc %d0,%itt1: no more RAM TTs
+	.long	0x4e7b0007		| movc %d0,%dtt1
+	.word	0xf518			| pflusha
+	movl	%a2,%sp			| our idle lwp's stack, by its VA
+	ENDFRAME
+	.word	0xf4d8			| cinva bc
+	movl	#0x80008000,%d0
+	movc	%d0,%cacr		| turn on both caches
+	movc	%a3,%vbr		| our vectors: curcpu() works now
+	movl	#USRSTACK-4,%a2
+	movl	%a2,%usp		| init user SP
+	movl	%a4,%sp@-
+	jbsr	_C_LABEL(cpu_hatch)	| does not return
+	PANIC("cpu_hatch returned")
+#endif /* MULTIPROCESSOR */
+
 /*
  * Primitives
  */
@@ -818,7 +942,7 @@ Laststkadj:
 #if defined(M68040) || defined(M68060)
 ENTRY(suline)
 	movl	%sp@(4),%a0		| address to write
-	movl	_C_LABEL(curpcb),%a1	| current pcb
+	GETCURPCB(%a1)			| current pcb
 	movl	#Lslerr,%a1@(PCB_ONFAULT) | where to return to on a fault
 	movl	%sp@(8),%a1		| address of line
 	movl	%a1@+,%d0		| get lword
@@ -838,7 +962,7 @@ ENTRY(suline)
 Lslerr:
 	moveq	#-1,%d0
 Lsldone:
-	movl	_C_LABEL(curpcb),%a1	| current pcb
+	GETCURPCB(%a1)			| current pcb
 	clrl	%a1@(PCB_ONFAULT)	| clear fault address
 	rts
 #endif
@@ -872,6 +996,9 @@ ASLOCAL(Lboottt)
 	.balign	4
 ASLOCAL(Learlyvec)
 	.space	256*4			| all to Learlytrap
+#ifdef MULTIPROCESSOR
+	.space	4			| the cpu_info (VB_CI)
+#endif
 #endif
 
 /* The 68040's (see Lboot040). */

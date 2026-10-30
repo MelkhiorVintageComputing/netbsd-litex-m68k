@@ -43,6 +43,8 @@ __KERNEL_RCSID(0, "$NetBSD: bus_dma.c,v 1.1.4.1 2026/06/28 09:36:55 martin Exp $
 
 #define _LITEX68K_BUS_DMA_PRIVATE
 
+#include "opt_multiprocessor.h"
+
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
@@ -58,6 +60,9 @@ __KERNEL_RCSID(0, "$NetBSD: bus_dma.c,v 1.1.4.1 2026/06/28 09:36:55 martin Exp $
 #include <machine/pmap.h>
 #include <machine/bus.h>
 #include <m68k/cacheops.h>
+#ifdef MULTIPROCESSOR
+#include <litex68k/litex68k/cpu_mp.h>
+#endif
 
 int	_bus_dmamap_load_buffer_direct_common(bus_dma_tag_t,
 	    bus_dmamap_t, void *, bus_size_t, struct vmspace *, int,
@@ -463,6 +468,12 @@ _bus_dmamap_sync_0460(bus_dma_tag_t t, bus_dmamap_t map, bus_addr_t offset,
 	/* If the whole DMA map is uncached, do nothing.  */
 	if (map->_dm_flags & BUS_DMA_COHERENT)
 		return;
+
+#ifdef MULTIPROCESSOR
+	/* The device's writes weren't snooped: see litex68k_dcinv_others. */
+	if ((ops & BUS_DMASYNC_POSTREAD) != 0)
+		litex68k_dcinv_others();
+#endif
 
 	/* Short-circuit for unsupported `ops' */
 	if ((ops & (BUS_DMASYNC_PREREAD | BUS_DMASYNC_PREWRITE)) == 0)

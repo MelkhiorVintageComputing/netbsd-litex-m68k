@@ -73,6 +73,13 @@ struct bi_record {
 #define	BI_LITEX_UART		BI_MACHDEP(3)	/* bi_litex_dev */
 #define	BI_LITEX_TIMER0		BI_MACHDEP(4)	/* bi_litex_dev */
 #define	BI_LITEX_DTB		BI_MACHDEP(5)	/* bi_mem_info */
+/*
+ * The two-processor builds only (litexboot -D__rd68041_smp__; numbers
+ * proposed to litex-68k, not final): the SMP block, as base and the
+ * number of CPUs, and CPU 1's timer.
+ */
+#define	BI_LITEX_SMP		BI_MACHDEP(6)	/* bi_litex_dev: base, ncpus */
+#define	BI_LITEX_TIMER1		BI_MACHDEP(7)	/* bi_litex_dev */
 
 struct bi_mem_info {
 	uint32_t	mem_addr;	/* PA of memory segment */

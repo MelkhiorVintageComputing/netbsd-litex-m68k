@@ -39,6 +39,8 @@
 #include <sys/cdefs.h>
 __KERNEL_RCSID(0, "$NetBSD$");
 
+#include "opt_multiprocessor.h"
+
 #include <sys/param.h>
 #include <sys/bus.h>
 #include <sys/device.h>
@@ -50,21 +52,12 @@ __KERNEL_RCSID(0, "$NetBSD$");
 #include <machine/clockvar.h>
 
 #include <litex68k/dev/mainbusvar.h>
+#include <litex68k/dev/litextimerreg.h>
+#ifdef MULTIPROCESSOR
+#include <sys/lock.h>
+#include <litex68k/litex68k/cpu_mp.h>
+#endif
 
-#define	TIMER_LOAD		0x00
-#define	TIMER_RELOAD		0x04
-#define	TIMER_EN		0x08
-#define	TIMER_UPDATE_VALUE	0x0c
-#define	TIMER_VALUE		0x10
-#define	TIMER_EV_STATUS		0x14
-#define	TIMER_EV_PENDING	0x18
-#define	TIMER_EV_ENABLE		0x1c
-#define	TIMER_UPTIME_LATCH	0x20
-#define	TIMER_UPTIME_HI		0x24
-#define	TIMER_UPTIME_LO		0x28
-#define	TIMER_SIZE		0x2c
-
-#define	TIMER_EV_ZERO		__BIT(0)
 
 struct litextimer_softc {
 	device_t		sc_dev;
@@ -94,14 +87,27 @@ static const struct device_compatible_entry compat_data[] = {
 	DEVICE_COMPAT_EOL
 };
 
+#ifdef MULTIPROCESSOR
+/* The latch is shared: another CPU's would change the words we read. */
+static __cpu_simple_lock_t litextimer_latch_lock = __SIMPLELOCK_UNLOCKED;
+#endif
+
 static uint64_t
 litextimer_uptime(struct litextimer_softc *sc)
 {
 	uint32_t hi, lo;
+#ifdef MULTIPROCESSOR
+	int s = splhigh();
 
+	__cpu_simple_lock(&litextimer_latch_lock);
+#endif
 	REG_WRITE(sc, TIMER_UPTIME_LATCH, 1);
 	hi = REG_READ(sc, TIMER_UPTIME_HI);
 	lo = REG_READ(sc, TIMER_UPTIME_LO);
+#ifdef MULTIPROCESSOR
+	__cpu_simple_unlock(&litextimer_latch_lock);
+	splx(s);
+#endif
 	return ((uint64_t)hi << 32) | lo;
 }
 
@@ -125,6 +131,11 @@ litextimer_intr(void *v)
 
 	sc->sc_evcnt->ev_count++;
 	sc->sc_handler((struct clockframe *)v);
+#ifdef MULTIPROCESSOR
+	/* The other CPUs' ticks, when they have no timer of their own. */
+	if (litex68k_clock_ipi != NULL)
+		(*litex68k_clock_ipi)();
+#endif
 	return 1;
 }
 

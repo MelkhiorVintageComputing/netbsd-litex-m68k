@@ -44,6 +44,7 @@ __KERNEL_RCSID(0, "$NetBSD: machdep.c,v 1.9.4.1 2025/11/21 09:53:25 martin Exp $
 #include "opt_ddb.h"
 #include "opt_modular.h"
 #include "opt_m68k_arch.h"
+#include "opt_multiprocessor.h"
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -88,6 +89,7 @@ __KERNEL_RCSID(0, "$NetBSD: machdep.c,v 1.9.4.1 2025/11/21 09:53:25 martin Exp $
 #include <machine/psl.h>
 #include <machine/pte.h>
 #include <machine/vmparam.h>
+#include <machine/vectors.h>
 #include <m68k/include/cacheops.h>
 #include <dev/cons.h>
 #include <dev/mm.h>
@@ -103,8 +105,17 @@ __KERNEL_RCSID(0, "$NetBSD: machdep.c,v 1.9.4.1 2025/11/21 09:53:25 martin Exp $
 /* the following is used externally (sysctl_hw) */
 char	machine[] = MACHINE;	/* from <machine/param.h> */
 
+#ifdef MULTIPROCESSOR
+/* The boot CPU; the others are allocated when they attach. */
+struct cpu_info cpu_info_store = {
+	.ci_self = &cpu_info_store,
+	.ci_vectors = vectab,
+};
+struct cpu_info *cpu_info_list = &cpu_info_store;
+#else
 /* Our exported CPU info; we can have only one. */  
 struct cpu_info cpu_info_store;
+#endif
 
 struct vm_map *phys_map = NULL;
 
@@ -838,7 +849,11 @@ const uint16_t ipl2psl_table[NIPL] = {
 	[IPL_SOFTNET]    = PSL_S | PSL_IPL1,
 	[IPL_SOFTSERIAL] = PSL_S | PSL_IPL1,
 	[IPL_VM]         = PSL_S | PSL_IPL2,
+#ifdef MULTIPROCESSOR
+	[IPL_SCHED]      = PSL_S | PSL_IPL5,	/* the IPIs' level */
+#else
 	[IPL_SCHED]      = PSL_S | PSL_IPL3,
+#endif
 	[IPL_HIGH]       = PSL_S | PSL_IPL7,
 };
 

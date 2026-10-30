@@ -118,6 +118,29 @@ static const struct {
 	{ BI_LITEX_UART,	"litex,liteuart",	0x20 },
 };
 
+/*
+ * The SMP block of the two-processor builds, before every other device:
+ * the CPUs it attaches size what the MI code sets up per CPU (litexsmp(4)).
+ */
+static void
+mainbus_attach_smp(device_t self)
+{
+	struct mainbus_attach_args ma = {
+		.ma_st = &_mainbus_space_tag,
+		.ma_dmat = &_mainbus_dma_tag,
+		.ma_fdt_node = -1,
+		.ma_compatible = "litex,rd68041-smp",
+		.ma_size = 0x100,
+		.ma_irq = -1,
+	};
+	struct bi_litex_dev *ld = bootinfo_litex_dev(BI_LITEX_SMP);
+
+	if (ld == NULL)
+		return;
+	ma.ma_addr = ld->ld_base;
+	config_found(self, &ma, mainbus_print, CFARGS_NONE);
+}
+
 static bool
 mainbus_attach_litex(struct bi_record *bi, void *v)
 {
@@ -194,6 +217,7 @@ mainbus_attach(device_t parent __unused, device_t self, void *args __unused)
 	    (mmutype == MMU_68040) ? _bus_dmamap_sync_0460
 				   : _bus_dmamap_sync_030;
 
+	mainbus_attach_smp(self);
 	bootinfo_enumerate(mainbus_attach_litex, self);
 
 	litex_fdt_init();

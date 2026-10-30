@@ -65,7 +65,10 @@ __KERNEL_RCSID(0, "$NetBSD$");
 #include <uvm/uvm_extern.h>
 
 #define	IRQCTRL_PENDING		0x0
-#define	IRQCTRL_MASK		0x4
+#define	IRQCTRL_MASK		0x4	/* CPU 0's */
+#define	IRQCTRL_MASK1		0x8	/* CPU 1's, on the two-CPU builds */
+#define	IRQCTRL_MASK_CPU(n)	((n) == 0 ? IRQCTRL_MASK : IRQCTRL_MASK1)
+#define	IRQ_NCPUS		2	/* mask words */
 
 struct intrhand {
 	LIST_ENTRY(intrhand)	ih_link;
@@ -73,6 +76,7 @@ struct intrhand {
 	void			*ih_arg;
 	struct evcnt		*ih_evcnt;
 	int			ih_irq;
+	u_int			ih_cpu;		/* whose mask has the line */
 };
 
 static const char * const cpu_irq_group = "cpu irq";
@@ -105,10 +109,32 @@ static struct evcnt litex_evcnt[NIRQ];
 
 static LIST_HEAD(intrhand_list, intrhand) intrhands[NIRQ];
 
+#ifndef MULTIPROCESSOR		/* else ci_idepth */
 volatile unsigned int	intr_depth;	/* used in locore.s */
+#endif
 
 static volatile uint32_t *irqctrl;	/* the CSRs, mapped by TT0 */
-static uint32_t		irq_mask;	/* soft copy of irq_mask */
+static uint32_t		irq_mask[IRQ_NCPUS]; /* soft copies of the masks */
+
+/* Level 5: the interprocessor interrupt, set by litexsmp(4). */
+void			(*litex68k_ipi_intr)(struct clockframe *);
+
+#ifdef MULTIPROCESSOR
+static __cpu_simple_lock_t intr_lock = __SIMPLELOCK_UNLOCKED;
+#define	INTR_LOCK()	__cpu_simple_lock(&intr_lock)
+#define	INTR_UNLOCK()	__cpu_simple_unlock(&intr_lock)
+#else
+#define	INTR_LOCK()	__nothing
+#define	INTR_UNLOCK()	__nothing
+#endif
+
+static void
+irq_setmask(u_int cpu, uint32_t mask)
+{
+
+	irq_mask[cpu] = mask;
+	irqctrl[IRQCTRL_MASK_CPU(cpu) / 4] = mask;
+}
 
 /*
  * intr_init --
@@ -140,9 +166,11 @@ intr_init(void)
 	}
 	irqctrl = (volatile uint32_t *)ld->ld_base;
 
-	/* Everything masked until a handler is established. */
-	irq_mask = 0;
-	irqctrl[IRQCTRL_MASK / 4] = irq_mask;
+	/*
+	 * Everything masked until a handler is established.  CPU 1's
+	 * mask (if any) is 0 from reset.
+	 */
+	irq_setmask(0, 0);
 }
 
 /*
@@ -153,12 +181,25 @@ intr_init(void)
  */
 void *
 intr_establish(int (*func)(void *), void *arg, int irq, int ipl,
-    int flags __unused)
+    int flags)
+{
+
+	return intr_establish_cpu(func, arg, irq, ipl, flags, 0);
+}
+
+/*
+ * intr_establish_cpu --
+ *	The same, the line unmasked on CPU "cpu" (its number, as
+ *	litexsmp(4)'s WHOAMI) rather than on CPU 0: CPU 1's own timer.
+ */
+void *
+intr_establish_cpu(int (*func)(void *), void *arg, int irq, int ipl,
+    int flags __unused, u_int cpu)
 {
 	struct intrhand *ih;
 	int s;
 
-	if (irq < 0 || irq >= NIRQ) {
+	if (irq < 0 || irq >= NIRQ || cpu >= IRQ_NCPUS) {
 		return NULL;
 	}
 	if (ipl < IPL_VM || ipl > IPL_SCHED) {
@@ -169,12 +210,14 @@ intr_establish(int (*func)(void *), void *arg, int irq, int ipl,
 	ih->ih_func = func;
 	ih->ih_arg = arg;
 	ih->ih_irq = irq;
+	ih->ih_cpu = cpu;
 	ih->ih_evcnt = &litex_evcnt[irq];
 
 	s = splhigh();
+	INTR_LOCK();
 	LIST_INSERT_HEAD(&intrhands[irq], ih, ih_link);
-	irq_mask |= __BIT(irq);
-	irqctrl[IRQCTRL_MASK / 4] = irq_mask;
+	irq_setmask(cpu, irq_mask[cpu] | __BIT(irq));
+	INTR_UNLOCK();
 	splx(s);
 
 	return ih;
@@ -192,11 +235,13 @@ intr_disestablish(void *v)
 	int s;
 
 	s = splhigh();
+	INTR_LOCK();
 	LIST_REMOVE(ih, ih_link);
 	if (LIST_EMPTY(&intrhands[ih->ih_irq])) {
-		irq_mask &= ~__BIT(ih->ih_irq);
-		irqctrl[IRQCTRL_MASK / 4] = irq_mask;
+		irq_setmask(ih->ih_cpu,
+		    irq_mask[ih->ih_cpu] & ~__BIT(ih->ih_irq));
 	}
+	INTR_UNLOCK();
 	splx(s);
 
 	kmem_free(ih, sizeof(*ih));
@@ -224,12 +269,18 @@ void
 intr_dispatch(struct clockframe frame)
 {
 	const int ipl = VECO_TO_VECI(frame.cf_vo) - VEC_AVINTR;
+	const u_int cpu = cpu_number();
 	struct intrhand *ih;
 	uint32_t pending;
 	int irq;
 
 	curcpu()->ci_data.cpu_nintr++;
 
+	if (ipl == LITEX_IPI_IPL && litex68k_ipi_intr != NULL) {
+		cpu_evcnt[ipl].ev_count++;
+		(*litex68k_ipi_intr)(&frame);
+		return;
+	}
 	if (__predict_false(ipl != LITEX_IRQ_IPL)) {
 		if (ipl >= 0 && ipl < __arraycount(cpu_evcnt)) {
 			cpu_evcnt[ipl].ev_count++;
@@ -239,11 +290,12 @@ intr_dispatch(struct clockframe frame)
 	cpu_evcnt[ipl].ev_count++;
 
 	/*
-	 * Run the handlers of every line that is up, lowest first, until
-	 * none is.  A level 2 interrupt with nothing pending (a line
-	 * that dropped before we got here) is ignored.
+	 * Run the handlers of every line that is up and unmasked on this
+	 * CPU, lowest first, until none is.  A level 2 interrupt with
+	 * nothing pending (a line that dropped before we got here) is
+	 * ignored.
 	 */
-	while ((pending = irqctrl[IRQCTRL_PENDING / 4] & irq_mask) != 0) {
+	while ((pending = irqctrl[IRQCTRL_PENDING / 4] & irq_mask[cpu]) != 0) {
 		irq = ffs32(pending) - 1;
 		bool claimed = false;
 		LIST_FOREACH(ih, &intrhands[irq], ih_link) {
@@ -260,8 +312,9 @@ intr_dispatch(struct clockframe frame)
 			 */
 			printf("litex irq line %d: stray interrupt, "
 			    "masking it\n", irq);
-			irq_mask &= ~__BIT(irq);
-			irqctrl[IRQCTRL_MASK / 4] = irq_mask;
+			INTR_LOCK();
+			irq_setmask(cpu, irq_mask[cpu] & ~__BIT(irq));
+			INTR_UNLOCK();
 		}
 	}
 }

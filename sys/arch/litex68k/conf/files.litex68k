@@ -24,6 +24,9 @@ file arch/litex68k/dev/litexctrl.c		litexctrl
 device litextimer
 attach litextimer at mainbus
 file arch/litex68k/dev/litextimer.c		litextimer
+device litexsmp
+attach litexsmp at mainbus
+file arch/litex68k/dev/litexsmp.c		litexsmp
 
 device liteuart: tty
 attach liteuart at mainbus
@@ -49,6 +52,7 @@ file arch/litex68k/litex68k/disksubr.c
 file arch/litex68k/litex68k/intr.c
 file arch/litex68k/litex68k/litex_fdt.c
 file arch/litex68k/litex68k/machdep.c
+file arch/litex68k/litex68k/cpu_mp.c		multiprocessor
 file arch/litex68k/litex68k/pmap_bootstrap.c	compile-with "${NOPROF_C}"
 file arch/litex68k/litex68k/trap.c
 file arch/m68k/m68k/cacheops.c

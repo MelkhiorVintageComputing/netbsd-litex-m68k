@@ -39,6 +39,7 @@
 __KERNEL_RCSID(0, "$NetBSD: pmap_bootstrap.c,v 1.4 2024/01/02 07:46:49 thorpej Exp $");
 
 #include "opt_m68k_arch.h"
+#include "opt_multiprocessor.h"
 
 #include <sys/param.h>
 #include <sys/kcore.h>
@@ -455,6 +456,10 @@ pmap_bootstrap(paddr_t nextpa, paddr_t firstpa)
 		va += PAGE_SIZE;
 		RELOC(CADDR2, void *) = (void *)va;
 		va += PAGE_SIZE;
+#ifdef MULTIPROCESSOR
+		/* one CADDR1/CADDR2 pair per CPU, see pmap_motorola.c */
+		va += 2 * (MAXCPUS - 1) * PAGE_SIZE;
+#endif
 		RELOC(vmmap, void *) = (void *)va;
 		va += PAGE_SIZE;
 		RELOC(msgbufaddr, void *) = (void *)va;

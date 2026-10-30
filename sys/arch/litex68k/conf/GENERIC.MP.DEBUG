@@ -1,0 +1,8 @@
+# $NetBSD$
+#
+# GENERIC.MP with the kernel's consistency checks.
+
+include "arch/litex68k/conf/GENERIC.MP"
+
+options 	DIAGNOSTIC
+options 	LOCKDEBUG

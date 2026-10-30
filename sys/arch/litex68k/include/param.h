@@ -48,6 +48,9 @@
 #define	MACHINE		"litex68k"
 
 #ifdef _KERNEL
+/* The two-processor bitstreams; the pmap's masks are 32 bits wide. */
+#define	MAXCPUS		4
+
 /*
  * Grab the interrupt definitions
  */

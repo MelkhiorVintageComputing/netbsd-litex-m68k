@@ -42,6 +42,7 @@ include <sys/syscall.h>
 include <uvm/uvm_extern.h>
 
 include <machine/cpu.h>
+include <litex68k/litex68k/cpu_mp.h>
 include <machine/fcode.h>
 include <machine/psl.h>
 include <machine/pcb.h>
@@ -115,6 +116,18 @@ define	L_PRIVATE		offsetof(struct lwp, l_private)
 # interrupt/fault metering
 define	CI_NINTR		offsetof(struct cpu_info, ci_data.cpu_nintr)
 define	CI_NSYSCALL		offsetof(struct cpu_info, ci_data.cpu_nsyscall)
+define	CI_IDEPTH		offsetof(struct cpu_info, ci_idepth)
+ifdef MULTIPROCESSOR
+define	CI_CURLWP		offsetof(struct cpu_info, ci_curlwp)
+define	CI_CURPCB		offsetof(struct cpu_info, ci_curpcb)
+define	CI_ASTPENDING		offsetof(struct cpu_info, ci_astpending)
+define	CI_TMPSTK		offsetof(struct cpu_info, ci_tmpstk)
+define	VB_CI			offsetof(struct m68k_vecblk, vb_ci)
+define	HATCH_CI		offsetof(struct litex68k_hatch, h_ci)
+define	HATCH_SP		offsetof(struct litex68k_hatch, h_sp)
+define	HATCH_VBR		offsetof(struct litex68k_hatch, h_vbr)
+define	HATCH_SRP		offsetof(struct litex68k_hatch, h_srp)
+endif
 
 # PSL values (should just include psl.h?)
 define	PSL_S			PSL_S
