@@ -84,6 +84,23 @@
 #include <machine/cpu.h>
 #include <machine/pte.h>
 
+#ifdef _KERNEL
+/*
+ * The 68040/060 cache mode of cacheable memory, and the PTE bits that
+ * make it.  Copyback, or with M68K_PMAP_WRITETHROUGH write-through with
+ * U = 01, read and written alike: on a multiprocessor board whose UPA
+ * pins drive snoop control, the other processors then snoop every
+ * write, and no line is ever dirty.  PT pages and segment tables are
+ * cache inhibited (U = 00) in both, table searches not being snooped.
+ */
+#ifdef M68K_PMAP_WRITETHROUGH
+#define	PG_CACHED	(PG_CWT | PTE40_U0)
+#else
+#define	PG_CACHED	PG_CCB
+#endif
+#define	PG_CMODE	(PG_CMASK | PTE40_U0 | PTE40_U1)
+#endif
+
 #if defined(_KERNEL) && defined(MULTIPROCESSOR)
 #include <sys/mutex.h>
 #endif

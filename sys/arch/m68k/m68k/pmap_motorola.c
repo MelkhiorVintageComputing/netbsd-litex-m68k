@@ -1341,14 +1341,14 @@ pmap_init(void)
 
 		while (kptp) {
 			pmap_changebit(kptp->kpt_pa, PG_CI,
-				       (pt_entry_t)~PG_CCB);
+				       (pt_entry_t)~PG_CMODE);
 			kptp = kptp->kpt_next;
 		}
 
 		paddr = (paddr_t)Segtabzeropa;
 		while (paddr < (paddr_t)Segtabzeropa + M68K_STSIZE) {
 			pmap_changebit(paddr, PG_CI,
-				       (pt_entry_t)~PG_CCB);
+				       (pt_entry_t)~PG_CMODE);
 			paddr += PAGE_SIZE;
 		}
 
@@ -2213,12 +2213,22 @@ validate:
 		npte |= PG_CI;
 #endif
 #if defined(M68040) || defined(M68060)
+#ifdef M68K_PMAP_WRITETHROUGH
+	/* Read-only pages too: they are written through other mappings. */
+#if defined(M68020) || defined(M68030)
+	else if (mmutype == MMU_68040)
+#else
+	else
+#endif
+		npte |= PG_CACHED;
+#else
 #if defined(M68020) || defined(M68030)
 	else if (mmutype == MMU_68040 && (npte & (PG_PROT|PG_CI)) == PG_RW)
 #else
 	else if ((npte & (PG_PROT|PG_CI)) == PG_RW)
 #endif
-		npte |= PG_CCB;
+		npte |= PG_CACHED;
+#endif
 #endif
 
 	PMAP_DPRINTF(PDB_ENTER, ("enter: new pte value %x\n", npte));
@@ -2337,12 +2347,19 @@ pmap_kenter_pa(vaddr_t va, paddr_t pa, vm_prot_t prot, u_int flags)
 
 	npte = pa | pte_prot(pmap, prot) | PG_V | PG_W;
 #if defined(M68040) || defined(M68060)
+#ifdef M68K_PMAP_WRITETHROUGH
+#if defined(M68020) || defined(M68030)
+	if (mmutype == MMU_68040)
+#endif
+		npte |= PG_CACHED;
+#else
 #if defined(M68020) || defined(M68030)
 	if (mmutype == MMU_68040 && (npte & PG_PROT) == PG_RW)
 #else
 	if ((npte & PG_PROT) == PG_RW)
 #endif
-		npte |= PG_CCB;
+		npte |= PG_CACHED;
+#endif
 
 	if (mmutype == MMU_68040) {
 		DCFP(pa);
@@ -2743,12 +2760,11 @@ pmap_zero_page(paddr_t phys)
 #endif
 	{
 		/*
-		 * Set copyback caching on the page; this is required
-		 * for cache consistency (since regular mappings are
-		 * copyback as well).
+		 * Set the cache mode of regular mappings on the page;
+		 * this is required for cache consistency.
 		 */
 
-		npte |= PG_CCB;
+		npte |= PG_CACHED;
 	}
 #endif
 
@@ -2805,13 +2821,12 @@ pmap_copy_page(paddr_t src, paddr_t dst)
 #endif
 	{
 		/*
-		 * Set copyback caching on the pages; this is required
-		 * for cache consistency (since regular mappings are
-		 * copyback as well).
+		 * Set the cache mode of regular mappings on the pages;
+		 * this is required for cache consistency.
 		 */
 
-		npte1 |= PG_CCB;
-		npte2 |= PG_CCB;
+		npte1 |= PG_CACHED;
+		npte2 |= PG_CACHED;
 	}
 #endif
 
@@ -3556,7 +3571,7 @@ pmap_enter_ptpage(pmap_t pmap, vaddr_t va, bool can_fail)
 			pt_entry_t	*pte;
 
 			pte = pmap_pte(pmap_kernel(), pmap->pm_stab);
-			*pte = (*pte & ~PG_CMASK) | PG_CI;
+			*pte = (*pte & ~PG_CMODE) | PG_CI;
 			pmap->pm_stfree = protostfree;
 		}
 #endif
@@ -3731,7 +3746,7 @@ pmap_enter_ptpage(pmap_t pmap, vaddr_t va, bool can_fail)
 	{
 #ifdef DEBUG
 		pt_entry_t *pte = pmap_pte(pmap_kernel(), va);
-		if ((pmapdebug & PDB_PARANOIA) && (*pte & PG_CCB) == 0)
+		if ((pmapdebug & PDB_PARANOIA) && (*pte & PG_CMODE) != PG_CACHED)
 			printf("%s PT no CCB: kva=%lx ptpa=%lx pte@%p=%x\n",
 			    pmap == pmap_kernel() ? "Kernel" : "User",
 			    va, ptpa, pte, *pte);
@@ -3746,10 +3761,10 @@ pmap_enter_ptpage(pmap_t pmap, vaddr_t va, bool can_fail)
 
 		DCFP(ptpa);
 		ICPP(ptpa);
-		*kpte = (*kpte & ~PG_CCB) | PG_CI;
+		*kpte = (*kpte & ~PG_CMODE) | PG_CI;
 		pmap_tbis_local(va);
 #else
-		if (pmap_changebit(ptpa, PG_CI, (pt_entry_t)~PG_CCB))
+		if (pmap_changebit(ptpa, PG_CI, (pt_entry_t)~PG_CMODE))
 			DCIS();
 #endif
 	}
@@ -3920,8 +3935,8 @@ _pmap_set_page_cacheable(pmap_t pmap, vaddr_t va)
 #if defined(M68020) || defined(M68030)
 	if (mmutype == MMU_68040) {
 #endif
-	if (pmap_changebit(pmap_pte_pa(pmap_pte(pmap, va)), PG_CCB,
-			   (pt_entry_t)~PG_CI))
+	if (pmap_changebit(pmap_pte_pa(pmap_pte(pmap, va)), PG_CACHED,
+			   (pt_entry_t)~PG_CMODE))
 		DCIS();
 
 #if defined(M68020) || defined(M68030)
@@ -3947,7 +3962,7 @@ _pmap_set_page_cacheinhibit(pmap_t pmap, vaddr_t va)
 	if (mmutype == MMU_68040) {
 #endif
 	if (pmap_changebit(pmap_pte_pa(pmap_pte(pmap, va)), PG_CI,
-			   (pt_entry_t)~PG_CCB))
+			   (pt_entry_t)~PG_CMODE))
 		DCIS();
 #if defined(M68020) || defined(M68030)
 	} else

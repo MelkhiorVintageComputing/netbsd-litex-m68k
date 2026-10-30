@@ -22,6 +22,11 @@ defflag	opt_m68k_arch.h		M68030: M68K_MMU_68030
 defflag	opt_m68k_arch.h		M68040: M68K_MMU_68040
 defflag	opt_m68k_arch.h		M68060: M68K_MMU_68060
 
+# 68040/060 boards whose UPA pins drive snoop control (UM 4.5): every
+# cacheable page written through, with U = 01, so that the other
+# processors snoop it.
+defflag	opt_m68k_arch.h		M68K_PMAP_WRITETHROUGH
+
 # Emit Makefile vars for these kernel options so that compiler flags
 # can be tuned for CPU support.
 mkflagvar M68010 M68020 M68030 M68040 M68060
