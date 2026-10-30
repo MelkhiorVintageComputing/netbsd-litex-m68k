@@ -101,7 +101,7 @@ abscmp3(const struct fpn *a, const struct fpn *b)
 static struct fpn *
 __fpu_modrem(struct fpemu *fe, int is_mod)
 {
-	static struct fpn X, Y;
+	struct fpn X, Y;
 	struct fpn *x, *y, *r;
 	uint32_t signX, signY, signQ;
 	int j, l, q;

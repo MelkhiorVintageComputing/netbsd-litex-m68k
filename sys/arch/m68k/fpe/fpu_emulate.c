@@ -86,10 +86,17 @@ static int test_cc(struct fpemu *, int);
 int
 fpu_emulate(struct frame *frame, struct fpframe *fpf, ksiginfo_t *ksi)
 {
-	static struct instruction insn;
-	static struct fpemu fe;
+	struct instruction insn;
+	struct fpemu fe;
 	int optype, sig;
 	unsigned short sval;
+
+	/*
+	 * On the stack, not static: another CPU, or another lwp while this
+	 * one sleeps on a fault, may be emulating at the same time.
+	 */
+	memset(&insn, 0, sizeof(insn));
+	memset(&fe, 0, sizeof(fe));
 
 	/* initialize insn.is_datasize to tell it is *not* initialized */
 	insn.is_datasize = -1;

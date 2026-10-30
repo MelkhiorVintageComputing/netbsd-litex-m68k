@@ -196,7 +196,7 @@ static struct fpn *__fpu_logn(struct fpemu *fe);
 static struct fpn *
 __fpu_logn(struct fpemu *fe)
 {
-	static struct fpn X, F, U, V, W, KLOG2;
+	struct fpn X, F, U, V, W, KLOG2;
 	struct fpn *d;
 	int i, k;
 
