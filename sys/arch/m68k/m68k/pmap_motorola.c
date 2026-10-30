@@ -904,6 +904,16 @@ pmap_tlb_shootdown_ipi(void)
 	struct pmap_tlb_req *req;
 	uint32_t from;
 	u_int n, i;
+#if defined(M68040) || defined(M68060)
+	int dfc;
+
+	/*
+	 * TBIS selects each space with the DFC before its PFLUSH: this
+	 * IPI may have come between the two, in TBIS or in anything else
+	 * that set the DFC.  Give it back what it had set.
+	 */
+	__asm volatile("movc %%dfc,%0" : "=d" (dfc));
+#endif
 
 	while ((from = atomic_swap_32(&pmap_tlb_from[cpu_index(ci)], 0))
 	    != 0) {
@@ -932,6 +942,9 @@ pmap_tlb_shootdown_ipi(void)
 			atomic_and_32(&req->tr_pending, ~selfbit);
 		}
 	}
+#if defined(M68040) || defined(M68060)
+	__asm volatile("movc %0,%%dfc" : : "d" (dfc));
+#endif
 }
 #else
 #define	TBIS_LOCAL(va)	TBIS(va)
