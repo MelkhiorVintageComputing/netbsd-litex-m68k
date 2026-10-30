@@ -333,6 +333,11 @@ pmap_bootstrap(paddr_t nextpa, paddr_t firstpa)
 	pte = &pte[m68k_btop(m68k_trunc_page(&kernel_text))];
 	protopte = (m68k_trunc_page(&kernel_text) + firstpa) |
 	    PG_RO | PG_U | PG_V;
+#ifdef M68K_PMAP_WRITETHROUGH
+	/* Snooped, like every cacheable page (PG_CACHED, <m68k/pmap.h>). */
+	if (RELOC(mmutype, int) == MMU_68040)
+		protopte |= PG_CACHED;
+#endif
 	while (pte < epte) {
 		*pte++ = protopte;
 		protopte += PAGE_SIZE;
@@ -346,10 +351,11 @@ pmap_bootstrap(paddr_t nextpa, paddr_t firstpa)
 	epte = &epte[m68k_btop(kstpa - firstpa)];
 	protopte = (protopte & ~PG_PROT) | PG_RW;
 	/*
-	 * Enable copy-back caching of data pages
+	 * Enable copy-back caching of data pages (or write-through,
+	 * snooped: PG_CACHED)
 	 */
 	if (RELOC(mmutype, int) == MMU_68040)
-		protopte |= PG_CCB;
+		protopte |= PG_CACHED;
 	while (pte < epte) {
 		*pte++ = protopte;
 		protopte += PAGE_SIZE;
@@ -363,7 +369,7 @@ pmap_bootstrap(paddr_t nextpa, paddr_t firstpa)
 	epte = &epte[m68k_btop(nextpa - firstpa)];
 	protopte = (protopte & ~PG_PROT) | PG_RW;
 	if (RELOC(mmutype, int) == MMU_68040) {
-		protopte &= ~PG_CMASK;
+		protopte &= ~PG_CMODE;
 		protopte |= PG_CI;
 	}
 	while (pte < epte) {
