@@ -821,9 +821,12 @@ pmap_tlb_send(uint32_t targets, struct pmap_tlb_req *req)
 	uint32_t selfbit;
 	int s;
 
-	/* The other CPUs must be able to interrupt us while we wait. */
+	/*
+	 * The other CPUs must be able to interrupt us while we wait:
+	 * their IPIs come at IPL_SCHED.
+	 */
 	s = splvm();
-	KASSERT((s & PSL_IPL) < PSL_IPL6);
+	KASSERT((s & PSL_IPL) < (ipl2psl_table[IPL_SCHED] & PSL_IPL));
 	self = curcpu();
 	selfbit = pmap_cpubit(self);
 	targets &= ~selfbit;
