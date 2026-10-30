@@ -521,12 +521,23 @@ ENTRY_NOPROFILE(fpfline)
 Lfp_unimp:
 #endif /* M68040 */
 #ifdef FPU_EMULATE
+	/*
+	 * Return through faultstkadj, not fault: the 68LC040 traps here
+	 * with a format 4 frame, which a signal sent from the emulation
+	 * (an operand that faults) shortens to format 0, leaving its
+	 * extra 8 bytes to the stack adjust.  Through fault, every such
+	 * signal left them on the kernel stack, until it overflowed.
+	 */
 	tstl	_C_LABEL(fputype)	| have an FPU?
 	jne	_C_LABEL(illinst)	| yes, a real illegal instruction
 	clrl	%sp@-			| stack adjust count
 	moveml	#0xFFFF,%sp@-		| save registers
-	moveq	#T_FPEMULI,%d0		| denote as FP emulation trap
-	jra	_ASM_LABEL(fault)	| do it
+	movl	%usp,%a0		| save the user SP
+	movl	%a0,%sp@(FR_SP)		|   in the savearea
+	clrl	%sp@-			| no VA arg
+	clrl	%sp@-			| or code arg
+	movl	#T_FPEMULI,%sp@-	| denote as FP emulation trap
+	jra	_ASM_LABEL(faultstkadj)	| do it, adjusting the stack
 #else
 	jra	_C_LABEL(illinst)
 #endif
