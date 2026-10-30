@@ -46,6 +46,12 @@ cd $B/obj/sys/arch/litex68k/compile/GENERIC && $B/tools/bin/nbmake-litex68k -j4
 Kernels must build warning-free, because `-Werror` is on.
 - `GENERIC`: one kernel for the 030 and the 040, with `FPU_EMULATE`.
 - `LITEX68K_MIN`: a small bring-up kernel, for short serial uploads.
+- `GENERIC.MP`: GENERIC plus `MULTIPROCESSOR` and `M68K_PMAP_WRITETHROUGH`,
+  for the two-CPU bitstream. It runs on one CPU on the UP bitstreams.
+- `GENERIC.MP.DEBUG`: GENERIC.MP plus `DIAGNOSTIC` and `LOCKDEBUG`.
+
+A new config's build directory is made with
+`$B/tools/bin/nbconfig -b $B/obj/sys/arch/litex68k/compile/<CONF> -s $PWD/sys sys/arch/litex68k/conf/<CONF>`.
 
 Strip a kernel before uploading it with `$B/tools/bin/m68k--netbsdelf-strip`.
 
@@ -68,7 +74,9 @@ scripts/board.py --bitstream <dir> --out-dir <workdir> sdboot --until ... --log 
 
 - **Bitstreams** are in `~/LITEX-68K/bitstreams/`, for example:
   - `wukong-rd68041-fpu-eth-sd-25m-4300689` for the 040;
-  - `wukong-fpu-eth-sd-7c668f4` for the 030.
+  - `wukong-fpu-eth-sd-7c668f4` for the 030;
+  - `wukong-rd68041-nofpu-smp-timer1-eth-sd-25m-c5ba651` for SMP: two
+    MC68LC040s, no FPU (use `--out-dir ~/LITEX-68K/board-work-smp`).
 - **Use a separate `--out-dir` per CPU** (e.g. `~/LITEX-68K/board-work-030`).
   board.py rebuilds litexboot there with make, and make doesn't notice a
   bitstream change, so a shared dir boots the wrong CPU's litexboot.
@@ -125,6 +133,26 @@ repartitioning the card or committing to `~/LITEX-68K/litex-68k`.
   `_lwp_getprivate` without going through `syscall()`. Every m68k TLS access is
   that syscall. A traced or non-native process takes the full path, so ktrace
   still works. The offsets it uses come from `genassym.cf`.
+- **SMP (`MULTIPROCESSOR`):** the board follows RD68041's "setup A"
+  (`litex-68k/doc/l18-smp.md`, `porting-bsd.md` section 10). The MP base is
+  virt68k-smp's NetBSD series (BSD; never open its QEMU half).
+  - Litexboot's `BI_LITEX_SMP` (0x8006) gives the SMP block at
+    `$FFFF_0000`. Without it, the kernel runs on one CPU.
+  - `BI_LITEX_TIMER1` (0x8007) gives CPU 1's timer, which drives its
+    hardclock.
+  - `dev/litexsmp.c` starts CPU 1, through `cpu_spinup_trampoline` in
+    `locore.s`. BOOT_PC is a physical address, and the MMU is still off.
+  - It also handles IPIs: level 5, with the reasons in a per-CPU mailbox
+    (`cpu_mp.[ch]`). `IPL_SCHED` is level 5 under MP.
+  - `curcpu()` is read at VBR+1024; each CPU has its own vector table copy.
+  - **Interrupt masks:** each CPU has its own LiteX mask, `cpu_irq_mask`
+    for CPU 0 and `cpu_irq_mask1` for CPU 1. `cpu_irq_pending` is shared,
+    so a handler takes only the lines in its own mask.
+  - **Coherency:** every cacheable page is write-through with U = 01
+    (`PG_CACHED`); PT pages and segment tables are cache-inhibited. Copyback
+    is never used under MP. ATCs are flushed by IPI shootdowns.
+  - **DMA isn't snooped:** after a DMA read, the other CPUs are IPIed to
+    `cinva bc` (`litex68k_dcinv_others()`).
 - **Outside `sys/arch/litex68k`**, the port touches:
   - `build.sh`, `share/mk/bsd.own.mk`, `sys/arch/README`, `tools/headerlist`;
   - `etc/etc.litex68k/` (the console is `ttyLX0`);
@@ -141,3 +169,5 @@ repartitioning the card or committing to `~/LITEX-68K/litex-68k`.
   subject, then a body explaining the bug and how it was found.
 - Code follows NetBSD KNF and the surrounding virt68k style.
 - Commit locally, but ask before pushing or sending anything upstream.
+- `UPSTREAM.md` lists the fixes that matter to other m68k ports. Add to it
+  when a fix touches shared m68k code, or a bug other ports copied.
