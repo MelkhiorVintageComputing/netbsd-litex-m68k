@@ -199,6 +199,16 @@ cpu_hatch(struct cpu_info *ci)
 	/* NOTREACHED */
 }
 
+/* At halt, on CPU 0: CPU 1 back in reset, as smp_hold_cpu1() does. */
+static void
+litexsmp_hold_others(void)
+{
+	struct litexsmp_softc * const sc = litexsmp_sc;
+
+	REG_WRITE(sc, LITEXSMP_RELEASE, 0);
+	REG_WRITE(sc, LITEXSMP_BOOT_PC, 0);
+}
+
 static void
 litexsmp_boot_secondaries(void)
 {
@@ -353,6 +363,7 @@ litexsmp_attach(device_t parent, device_t self, void *aux)
 	litex68k_ipi_intr = litexsmp_ipi_intr;
 	litex68k_ipi_send = litexsmp_ipi_send;
 	litex68k_boot_secondaries = litexsmp_boot_secondaries;
+	litex68k_hold_others = litexsmp_hold_others;
 #else
 	if (sc->sc_ncpus > 1)
 		aprint_normal_dev(self,

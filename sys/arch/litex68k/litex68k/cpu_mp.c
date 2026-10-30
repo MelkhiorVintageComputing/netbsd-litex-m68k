@@ -217,3 +217,6 @@ void	(*litex68k_boot_secondaries)(void);
 
 /* Set by litexsmp(4) if the CPUs have no timer of their own. */
 void	(*litex68k_clock_ipi)(void);
+
+/* Set by litexsmp(4): puts the other CPUs back in reset, at halt. */
+void	(*litex68k_hold_others)(void);

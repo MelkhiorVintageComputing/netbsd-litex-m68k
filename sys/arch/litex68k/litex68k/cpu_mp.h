@@ -43,6 +43,7 @@ struct litex68k_hatch {
 extern void	(*litex68k_ipi_send)(struct cpu_info *, u_int);
 extern void	(*litex68k_boot_secondaries)(void);
 extern void	(*litex68k_clock_ipi)(void);
+extern void	(*litex68k_hold_others)(void);
 void	litex68k_ipi_dispatch(u_int);
 void	litex68k_dcinv_others(void);
 #endif

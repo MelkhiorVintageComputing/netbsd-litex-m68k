@@ -96,6 +96,10 @@ __KERNEL_RCSID(0, "$NetBSD: machdep.c,v 1.9.4.1 2025/11/21 09:53:25 martin Exp $
 
 #include <machine/kcore.h>	/* XXX should be pulled in by sys/kcore.h */
 
+#ifdef MULTIPROCESSOR
+#include <litex68k/litex68k/cpu_mp.h>
+#endif
+
 #ifdef DDB
 #include <machine/db_machdep.h>
 #include <ddb/db_extern.h>
@@ -470,6 +474,15 @@ cpu_reboot(int howto, char *bootstr)
 	doshutdownhooks();
 
 	pmf_system_shutdown(boothowto);
+
+#ifdef MULTIPROCESSOR
+	/*
+	 * Put the other CPUs back in reset (a reset of the SoC does it
+	 * too, but a halt doesn't reset it).
+	 */
+	if (litex68k_hold_others != NULL && CPU_IS_PRIMARY(curcpu()))
+		(*litex68k_hold_others)();
+#endif
 
 #if defined(PANICWAIT) && !defined(DDB)
 	if ((howto & RB_HALT) == 0 && panicstr) {
