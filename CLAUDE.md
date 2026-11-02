@@ -75,8 +75,10 @@ scripts/board.py --bitstream <dir> --out-dir <workdir> sdboot --until ... --log 
 - **Bitstreams** are in `~/LITEX-68K/bitstreams/`, for example:
   - `wukong-rd68041-fpu-eth-sd-25m-4300689` for the 040;
   - `wukong-fpu-eth-sd-7c668f4` for the 030;
-  - `wukong-rd68041-nofpu-smp-timer1-eth-sd-25m-c5ba651` for SMP: two
-    MC68LC040s, no FPU (use `--out-dir ~/LITEX-68K/board-work-smp`).
+  - `wukong-rd68041-nofpu-smp-timer1-eth-sd-30m-2ceb016` for SMP: two
+    MC68LC040s at 30 MHz, no FPU (use `--out-dir ~/LITEX-68K/board-work-smp30`).
+    The older `...-smp-timer1-eth-sd-25m-c5ba651` (25 MHz,
+    `--out-dir ~/LITEX-68K/board-work-smp`) has the same CSR map.
 - **Use a separate `--out-dir` per CPU** (e.g. `~/LITEX-68K/board-work-030`).
   board.py rebuilds litexboot there with make, and make doesn't notice a
   bitstream change, so a shared dir boots the wrong CPU's litexboot.
